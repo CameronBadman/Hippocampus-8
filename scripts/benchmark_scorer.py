@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import sys
 from collections import Counter
 from pathlib import Path
 from typing import Iterable
@@ -19,6 +20,12 @@ def main() -> None:
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--json-output", default=None)
+    parser.add_argument("--min-traversal-precision-at-1", type=float, default=None)
+    parser.add_argument("--min-attach-precision-at-1", type=float, default=None)
+    parser.add_argument("--min-traversal-average-precision", type=float, default=None)
+    parser.add_argument("--min-attach-average-precision", type=float, default=None)
+    parser.add_argument("--min-traversal-precision-at-recall-90", type=float, default=None)
+    parser.add_argument("--min-attach-precision-at-recall-80", type=float, default=None)
     args = parser.parse_args()
 
     device = pick_device(args.device)
@@ -43,6 +50,13 @@ def main() -> None:
         output_path = Path(args.json_output)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    failures = threshold_failures(report, args)
+    if failures:
+        print()
+        print("FAILED PRECISION GATES")
+        for failure in failures:
+            print(f"  {failure}")
+        sys.exit(1)
 
 
 def load_models(checkpoint_path: Path, *, device: torch.device) -> tuple[SmallTraversalNet, SmallAttachNet, TorchModelConfig]:
@@ -203,6 +217,7 @@ def ranking_metrics(
 
     threshold_05 = threshold_metrics(predictions, labels, threshold=0.5)
     best = best_f1(predictions, labels)
+    precision_curve = precision_recall_summary(predictions, labels)
     case_count = len(cases)
     kind_counts = Counter(kinds)
     return {
@@ -216,6 +231,13 @@ def ranking_metrics(
         "precision_at_1": precision_sums[1] / max(case_count, 1),
         "precision_at_3": precision_sums[3] / max(case_count, 1),
         "precision_at_5": precision_sums[5] / max(case_count, 1),
+        "average_precision": precision_curve["average_precision"],
+        "precision_at_recall_80": precision_curve["precision_at_recall_80"],
+        "precision_at_recall_90": precision_curve["precision_at_recall_90"],
+        "precision_at_recall_95": precision_curve["precision_at_recall_95"],
+        "recall_at_precision_80": precision_curve["recall_at_precision_80"],
+        "recall_at_precision_90": precision_curve["recall_at_precision_90"],
+        "recall_at_precision_95": precision_curve["recall_at_precision_95"],
         "recall_at_1": recall_sums[1] / max(case_count, 1),
         "recall_at_3": recall_sums[3] / max(case_count, 1),
         "recall_at_5": recall_sums[5] / max(case_count, 1),
@@ -260,6 +282,49 @@ def best_f1(scores: list[float], labels: list[int]) -> dict[str, float]:
     return best
 
 
+def precision_recall_summary(scores: list[float], labels: list[int]) -> dict[str, float]:
+    average_precision = average_precision_score(scores, labels)
+    curve = precision_recall_curve(scores, labels)
+    return {
+        "average_precision": average_precision,
+        "precision_at_recall_80": max_precision_at_recall(curve, 0.80),
+        "precision_at_recall_90": max_precision_at_recall(curve, 0.90),
+        "precision_at_recall_95": max_precision_at_recall(curve, 0.95),
+        "recall_at_precision_80": max_recall_at_precision(curve, 0.80),
+        "recall_at_precision_90": max_recall_at_precision(curve, 0.90),
+        "recall_at_precision_95": max_recall_at_precision(curve, 0.95),
+    }
+
+
+def average_precision_score(scores: list[float], labels: list[int]) -> float:
+    ranked = sorted(zip(scores, labels), key=lambda item: -item[0])
+    positives = sum(labels)
+    if positives == 0:
+        return 0.0
+    hits = 0
+    precision_sum = 0.0
+    for rank, (_, label) in enumerate(ranked, start=1):
+        if label == 1:
+            hits += 1
+            precision_sum += hits / rank
+    return precision_sum / positives
+
+
+def precision_recall_curve(scores: list[float], labels: list[int]) -> list[dict[str, float]]:
+    thresholds = sorted(set(scores), reverse=True)
+    return [threshold_metrics(scores, labels, threshold=threshold) | {"threshold": threshold} for threshold in thresholds]
+
+
+def max_precision_at_recall(curve: list[dict[str, float]], min_recall: float) -> float:
+    matching = [point["precision"] for point in curve if point["recall"] >= min_recall]
+    return max(matching, default=0.0)
+
+
+def max_recall_at_precision(curve: list[dict[str, float]], min_precision: float) -> float:
+    matching = [point["recall"] for point in curve if point["precision"] >= min_precision]
+    return max(matching, default=0.0)
+
+
 def f1(precision: float, recall: float) -> float:
     if precision + recall == 0.0:
         return 0.0
@@ -300,6 +365,25 @@ def read_jsonl(path: Path):
                 yield json.loads(stripped)
 
 
+def threshold_failures(report: dict, args: argparse.Namespace) -> list[str]:
+    checks = [
+        ("traversal", "precision_at_1", args.min_traversal_precision_at_1),
+        ("attach", "precision_at_1", args.min_attach_precision_at_1),
+        ("traversal", "average_precision", args.min_traversal_average_precision),
+        ("attach", "average_precision", args.min_attach_average_precision),
+        ("traversal", "precision_at_recall_90", args.min_traversal_precision_at_recall_90),
+        ("attach", "precision_at_recall_80", args.min_attach_precision_at_recall_80),
+    ]
+    failures = []
+    for section, metric, minimum in checks:
+        if minimum is None:
+            continue
+        value = report[section][metric]
+        if value < minimum:
+            failures.append(f"{section}.{metric}={value:.4f} < {minimum:.4f}")
+    return failures
+
+
 def print_report(report: dict) -> None:
     print(f"checkpoint: {report['checkpoint']}")
     print(f"benchmark:  {report['benchmark_dir']}")
@@ -318,6 +402,13 @@ def print_report(report: dict) -> None:
             "precision_at_1",
             "precision_at_3",
             "precision_at_5",
+            "average_precision",
+            "precision_at_recall_80",
+            "precision_at_recall_90",
+            "precision_at_recall_95",
+            "recall_at_precision_80",
+            "recall_at_precision_90",
+            "recall_at_precision_95",
             "recall_at_1",
             "recall_at_3",
             "recall_at_5",

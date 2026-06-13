@@ -78,6 +78,17 @@ python3 scripts/benchmark_scorer.py \
   --benchmark-dir data/benchmarks/synthetic
 ```
 
+Benchmark with precision gates:
+
+```bash
+python3 scripts/benchmark_scorer.py \
+  --checkpoint models/synthetic_scorer.pt \
+  --benchmark-dir data/benchmarks/synthetic \
+  --min-traversal-precision-at-1 0.98 \
+  --min-traversal-average-precision 0.98 \
+  --min-attach-precision-at-1 0.85
+```
+
 In Colab, save checkpoints and benchmark reports to Google Drive:
 
 ```bash
