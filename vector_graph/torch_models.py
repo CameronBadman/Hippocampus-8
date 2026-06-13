@@ -153,11 +153,11 @@ class SmallTraversalTransformerNet(nn.Module):
         self.path_projection = nn.Linear(path_dim, hidden_dim)
         self.scalar_projection = nn.Linear(scalar_dim, hidden_dim)
         self.cls_token = nn.Parameter(torch.zeros(1, 1, hidden_dim))
-        self.type_embedding = nn.Embedding(7, hidden_dim)
+        self.type_embedding = nn.Embedding(15, hidden_dim)
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=hidden_dim,
             nhead=heads,
-            dim_feedforward=hidden_dim * 2,
+            dim_feedforward=hidden_dim * 4,
             dropout=0.0,
             activation="gelu",
             batch_first=True,
@@ -175,6 +175,9 @@ class SmallTraversalTransformerNet(nn.Module):
             scalar_dim=self.scalar_dim,
         )
         batch_size = inputs.shape[0]
+        query_summary = fold_resize(query, self.summary_dim)
+        path_summary = fold_resize(path, self.summary_dim)
+        edge_query = fold_resize(query, self.edge_dim)
         tokens = torch.stack(
             [
                 self.query_projection(query),
@@ -183,6 +186,14 @@ class SmallTraversalTransformerNet(nn.Module):
                 self.summary_projection(dst),
                 self.path_projection(path),
                 self.scalar_projection(scalars),
+                self.summary_projection(query_summary * dst),
+                self.summary_projection(torch.abs(query_summary - dst)),
+                self.summary_projection(current * dst),
+                self.summary_projection(torch.abs(current - dst)),
+                self.summary_projection(path_summary * dst),
+                self.summary_projection(torch.abs(path_summary - dst)),
+                self.edge_projection(edge_query * edge),
+                self.edge_projection(torch.abs(edge_query - edge)),
             ],
             dim=1,
         )
@@ -212,11 +223,11 @@ class SmallAttachTransformerNet(nn.Module):
         self.full_projection = nn.Linear(full_dim, hidden_dim)
         self.path_projection = nn.Linear(path_dim, hidden_dim)
         self.cls_token = nn.Parameter(torch.zeros(1, 1, hidden_dim))
-        self.type_embedding = nn.Embedding(6, hidden_dim)
+        self.type_embedding = nn.Embedding(12, hidden_dim)
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=hidden_dim,
             nhead=heads,
-            dim_feedforward=hidden_dim * 2,
+            dim_feedforward=hidden_dim * 4,
             dropout=0.0,
             activation="gelu",
             batch_first=True,
@@ -232,6 +243,7 @@ class SmallAttachTransformerNet(nn.Module):
             path_dim=self.path_dim,
         )
         batch_size = inputs.shape[0]
+        path_summary = fold_resize(path, self.summary_dim)
         tokens = torch.stack(
             [
                 self.summary_projection(new_summary),
@@ -239,6 +251,12 @@ class SmallAttachTransformerNet(nn.Module):
                 self.full_projection(new_full),
                 self.full_projection(candidate_full),
                 self.path_projection(path),
+                self.summary_projection(new_summary * candidate_summary),
+                self.summary_projection(torch.abs(new_summary - candidate_summary)),
+                self.full_projection(new_full * candidate_full),
+                self.full_projection(torch.abs(new_full - candidate_full)),
+                self.summary_projection(path_summary * candidate_summary),
+                self.summary_projection(torch.abs(path_summary - candidate_summary)),
             ],
             dim=1,
         )
