@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import math
 import random
@@ -317,10 +316,5 @@ def round_vector(vector: Sequence[float]) -> list[float]:
     return [round(float(value), 6) for value in vector]
 
 
-def stable_id(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
-
-
 if __name__ == "__main__":
     main()
-

@@ -57,7 +57,7 @@ class SmallAttachNet(nn.Module):
         )
 
     def forward(self, inputs: Tensor) -> Tensor:
-        return torch.sigmoid(self.layers(inputs)).squeeze(-1)
+        return torch.sigmoid(self.layers(inputs))
 
 
 @dataclass(frozen=True)
