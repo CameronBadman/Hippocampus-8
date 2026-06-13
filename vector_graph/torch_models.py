@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Sequence
 
 try:
@@ -171,6 +172,28 @@ class TorchTraversalScorer(TraversalScorer):
         )
         return cls(traversal_model=traversal_model, attach_model=attach_model, config=config, device=device)
 
+    @classmethod
+    def from_checkpoint(cls, checkpoint_path: str | Path, *, device: str = "cpu") -> "TorchTraversalScorer":
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        config = TorchModelConfig(**checkpoint["config"])
+        traversal_model = SmallTraversalNet(
+            query_dim=config.query_dim,
+            summary_dim=config.summary_dim,
+            edge_dim=config.edge_dim,
+            path_dim=config.path_dim,
+            scalar_dim=config.scalar_dim,
+            hidden_dim=config.hidden_dim,
+        )
+        attach_model = SmallAttachNet(
+            summary_dim=config.summary_dim,
+            full_dim=config.full_dim,
+            path_dim=config.path_dim,
+            hidden_dim=config.attach_hidden_dim,
+        )
+        traversal_model.load_state_dict(checkpoint["traversal_model"])
+        attach_model.load_state_dict(checkpoint["attach_model"])
+        return cls(traversal_model=traversal_model, attach_model=attach_model, config=config, device=device)
+
     def score_edge(
         self,
         *,
@@ -181,25 +204,50 @@ class TorchTraversalScorer(TraversalScorer):
         path_vector: Sequence[float],
         hop: int,
     ) -> TraversalScores:
-        inputs = self._tensor(
-            [
-                resize_vector(query_vector, self.config.query_dim),
-                resize_vector(current_node.summary_vector, self.config.summary_dim),
-                resize_vector(edge.edge_vector, self.config.edge_dim),
-                resize_vector(dst_node.summary_vector, self.config.summary_dim),
-                resize_vector(path_vector, self.config.path_dim),
-                traversal_scalars(edge.confidence, hop, self.config.scalar_dim),
-            ]
-        )
+        return self.score_edges(
+            query_vector=query_vector,
+            current_node=current_node,
+            edges=[edge],
+            dst_nodes=[dst_node],
+            path_vector=path_vector,
+            hop=hop,
+        )[0]
+
+    def score_edges(
+        self,
+        *,
+        query_vector: Sequence[float],
+        current_node: NodeFrame,
+        edges: Sequence[EdgeFrame],
+        dst_nodes: Sequence[NodeFrame],
+        path_vector: Sequence[float],
+        hop: int,
+    ) -> tuple[TraversalScores, ...]:
+        if len(edges) != len(dst_nodes):
+            raise ValueError("edges and dst_nodes must have the same length")
+        if not edges:
+            return ()
+
+        rows = []
+        query = resize_vector(query_vector, self.config.query_dim)
+        current_summary = resize_vector(current_node.summary_vector, self.config.summary_dim)
+        path = resize_vector(path_vector, self.config.path_dim)
+        for edge, dst_node in zip(edges, dst_nodes):
+            rows.append(
+                [
+                    query,
+                    current_summary,
+                    resize_vector(edge.edge_vector, self.config.edge_dim),
+                    resize_vector(dst_node.summary_vector, self.config.summary_dim),
+                    path,
+                    traversal_scalars(edge.confidence, hop, self.config.scalar_dim),
+                ]
+            )
+
+        inputs = self._batch_tensor(rows)
         with torch.inference_mode():
-            scores = self.traversal_model(inputs).detach().cpu().reshape(-1).tolist()
-        return TraversalScores(
-            follow_score=float(scores[0]),
-            read_full_score=float(scores[1]),
-            include_score=float(scores[2]),
-            expand_score=float(scores[3]),
-            stop_score=float(scores[4]),
-        )
+            batch_scores = self.traversal_model(inputs).detach().cpu().tolist()
+        return tuple(_scores_from_values(scores) for scores in batch_scores)
 
     def score_attach(
         self,
@@ -226,6 +274,20 @@ class TorchTraversalScorer(TraversalScorer):
     def _tensor(self, vectors: Sequence[Sequence[float]]) -> Tensor:
         values = torch.tensor([value for vector in vectors for value in vector], dtype=torch.float32, device=self.device)
         return values.unsqueeze(0)
+
+    def _batch_tensor(self, rows: Sequence[Sequence[Sequence[float]]]) -> Tensor:
+        values = [[value for vector in row for value in vector] for row in rows]
+        return torch.tensor(values, dtype=torch.float32, device=self.device)
+
+
+def _scores_from_values(values: Sequence[float]) -> TraversalScores:
+    return TraversalScores(
+        follow_score=float(values[0]),
+        read_full_score=float(values[1]),
+        include_score=float(values[2]),
+        expand_score=float(values[3]),
+        stop_score=float(values[4]),
+    )
 
 
 def traversal_scalars(confidence: float, hop: int, scalar_dim: int = 2) -> tuple[float, ...]:

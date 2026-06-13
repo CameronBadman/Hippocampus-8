@@ -1,4 +1,6 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from vector_graph import EdgeFrame, GraphStore, NodeFrame, TraversalConfig, TraversalController, embed_text
 from vector_graph.vectors import stable_edge_vector
@@ -53,7 +55,81 @@ class TorchModelTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(len(first.visited), 1)
 
+    def test_batch_scores_match_single_scores_and_checkpoint_loads(self) -> None:
+        try:
+            import torch
+            from vector_graph.torch_models import TorchModelConfig, TorchTraversalScorer
+        except ImportError as exc:
+            self.skipTest(str(exc))
+
+        store = GraphStore(max_outgoing_edges=8)
+        root = NodeFrame(node_id="root", summary_vector=embed_text("root graph", 32))
+        children = [
+            NodeFrame(node_id="a", summary_vector=embed_text("alpha traversal", 32)),
+            NodeFrame(node_id="b", summary_vector=embed_text("beta edge", 32)),
+            NodeFrame(node_id="c", summary_vector=embed_text("gamma node", 32)),
+        ]
+        store.add_node(root)
+        for child in children:
+            store.add_node(child)
+            store.add_edge(
+                EdgeFrame(
+                    src_id="root",
+                    dst_id=child.node_id,
+                    edge_vector=stable_edge_vector(root.summary_vector, child.summary_vector, 16),
+                    confidence=0.8,
+                )
+            )
+
+        config = TorchModelConfig(query_dim=32, summary_dim=32, edge_dim=16, full_dim=64, path_dim=32)
+        scorer = TorchTraversalScorer.initialized(config, seed=11)
+        query = embed_text("alpha edge traversal", 32)
+        edges = store.get_edges("root")
+        dst_nodes = [store.get_node(edge.dst_id) for edge in edges]
+        batch = scorer.score_edges(
+            query_vector=query,
+            current_node=root,
+            edges=edges,
+            dst_nodes=dst_nodes,
+            path_vector=root.summary_vector,
+            hop=0,
+        )
+        singles = tuple(
+            scorer.score_edge(
+                query_vector=query,
+                current_node=root,
+                edge=edge,
+                dst_node=dst,
+                path_vector=root.summary_vector,
+                hop=0,
+            )
+            for edge, dst in zip(edges, dst_nodes)
+        )
+        self.assertEqual(batch, singles)
+
+        with TemporaryDirectory() as tmpdir:
+            checkpoint = Path(tmpdir) / "scorer.pt"
+            torch.save(
+                {
+                    "config": config.__dict__,
+                    "traversal_model": scorer.traversal_model.state_dict(),
+                    "attach_model": scorer.attach_model.state_dict(),
+                },
+                checkpoint,
+            )
+            loaded = TorchTraversalScorer.from_checkpoint(checkpoint)
+            self.assertEqual(
+                loaded.score_edges(
+                    query_vector=query,
+                    current_node=root,
+                    edges=edges,
+                    dst_nodes=dst_nodes,
+                    path_vector=root.summary_vector,
+                    hop=0,
+                ),
+                batch,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
-

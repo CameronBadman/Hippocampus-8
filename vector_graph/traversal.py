@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Callable, Sequence, cast
 
-from .frames import TraversalDecision, TraversalResult
+from .frames import EdgeFrame, NodeFrame, TraversalDecision, TraversalResult, TraversalScores
 from .scorer import TraversalScorer, path_vector_for
 from .store import GraphStore
 
@@ -56,6 +56,8 @@ class TraversalController:
                 path_nodes = [self.store.get_node(node_id) for node_id in path]
                 path_vector = path_vector_for(path_nodes, len(seed_node.summary_vector))
                 node_candidates: list[tuple[float, float, str, TraversalDecision]] = []
+                edge_batch: list[EdgeFrame] = []
+                dst_batch: list[NodeFrame] = []
 
                 for edge in self.store.get_edges(current_id):
                     if len(decisions) + len(candidates) + len(node_candidates) >= self.config.max_visited:
@@ -64,14 +66,19 @@ class TraversalController:
                         continue
 
                     dst_node = self.store.get_node(edge.dst_id)
-                    scores = self.scorer.score_edge(
-                        query_vector=query_vector,
-                        current_node=current_node,
-                        edge=edge,
-                        dst_node=dst_node,
-                        path_vector=path_vector,
-                        hop=hop,
-                    )
+                    edge_batch.append(edge)
+                    dst_batch.append(dst_node)
+
+                scores_batch = self._score_edge_batch(
+                    query_vector=query_vector,
+                    current_node=current_node,
+                    edges=edge_batch,
+                    dst_nodes=dst_batch,
+                    path_vector=path_vector,
+                    hop=hop,
+                )
+
+                for edge, dst_node, scores in zip(edge_batch, dst_batch, scores_batch):
                     read_full = (
                         dst_node.full_vector is not None
                         and full_reads < self.config.max_full_reads
@@ -124,3 +131,37 @@ class TraversalController:
         included = tuple(decision for decision in visited if decision.included)
         rejected = tuple(decision for decision in visited if not decision.included)
         return TraversalResult(seed_id=seed_id, included=included, rejected=rejected, visited=visited)
+
+    def _score_edge_batch(
+        self,
+        *,
+        query_vector: Sequence[float],
+        current_node: NodeFrame,
+        edges: Sequence[EdgeFrame],
+        dst_nodes: Sequence[NodeFrame],
+        path_vector: Sequence[float],
+        hop: int,
+    ) -> tuple[TraversalScores, ...]:
+        score_edges = getattr(self.scorer, "score_edges", None)
+        if score_edges is not None:
+            return tuple(
+                cast(Callable[..., Sequence[TraversalScores]], score_edges)(
+                    query_vector=query_vector,
+                    current_node=current_node,
+                    edges=edges,
+                    dst_nodes=dst_nodes,
+                    path_vector=path_vector,
+                    hop=hop,
+                )
+            )
+        return tuple(
+            self.scorer.score_edge(
+                query_vector=query_vector,
+                current_node=current_node,
+                edge=edge,
+                dst_node=dst_node,
+                path_vector=path_vector,
+                hop=hop,
+            )
+            for edge, dst_node in zip(edges, dst_nodes)
+        )

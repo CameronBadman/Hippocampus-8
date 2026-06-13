@@ -78,4 +78,17 @@ python3 scripts/benchmark_scorer.py \
   --benchmark-dir data/benchmarks/synthetic
 ```
 
+In Colab, save checkpoints and benchmark reports to Google Drive:
+
+```bash
+python3 scripts/colab_train_to_drive.py
+```
+
+Default Drive outputs:
+
+```text
+/content/drive/MyDrive/Hippocampus-8/checkpoints/latest.pt
+/content/drive/MyDrive/Hippocampus-8/reports/latest_benchmark.json
+```
+
 # Hippocampus-8
