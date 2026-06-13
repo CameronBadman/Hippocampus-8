@@ -195,6 +195,41 @@ class TorchModelTests(unittest.TestCase):
             )
             self.assertEqual(score, loaded_score)
 
+    def test_hybrid_attach_head_scores(self) -> None:
+        try:
+            from vector_graph.torch_models import TorchModelConfig, TorchTraversalScorer
+        except ImportError as exc:
+            self.skipTest(str(exc))
+
+        config = TorchModelConfig(
+            query_dim=32,
+            summary_dim=32,
+            edge_dim=16,
+            full_dim=64,
+            path_dim=32,
+            model_kind="transformer",
+            attach_head_kind="hybrid",
+        )
+        scorer = TorchTraversalScorer.initialized(config, seed=23)
+        new_node = NodeFrame(
+            node_id="new",
+            summary_vector=embed_text("new attach node", 32),
+            full_vector=embed_text("new attach node full detail", 64),
+        )
+        candidate_node = NodeFrame(
+            node_id="candidate",
+            summary_vector=embed_text("candidate attach node", 32),
+            full_vector=embed_text("candidate attach node full detail", 64),
+        )
+        score = scorer.score_attach(
+            new_node=new_node,
+            candidate_node=candidate_node,
+            path_vector=embed_text("attach path", 32),
+        )
+
+        self.assertGreaterEqual(score, 0.0)
+        self.assertLessEqual(score, 1.0)
+
     def test_listwise_loss_prefers_positive_rank_mass(self) -> None:
         try:
             import torch

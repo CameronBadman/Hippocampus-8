@@ -214,24 +214,18 @@ class SmallAttachTransformerNet(nn.Module):
         hidden_dim: int = 96,
         layers: int = 2,
         heads: int = 4,
+        head_kind: str = "transformer",
     ) -> None:
         super().__init__()
         self.summary_dim = summary_dim
         self.full_dim = full_dim
         self.path_dim = path_dim
+        self.head_kind = head_kind
         self.summary_projection = nn.Linear(summary_dim, hidden_dim)
         self.full_projection = nn.Linear(full_dim, hidden_dim)
         self.path_projection = nn.Linear(path_dim, hidden_dim)
         self.cls_token = nn.Parameter(torch.zeros(1, 1, hidden_dim))
         self.type_embedding = nn.Embedding(12, hidden_dim)
-        raw_dim = summary_dim + summary_dim + full_dim + full_dim + path_dim
-        interaction_dim = summary_dim * 4 + full_dim * 2
-        self.feature_projection = nn.Sequential(
-            nn.Linear(raw_dim + interaction_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.GELU(),
-        )
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=hidden_dim,
             nhead=heads,
@@ -241,13 +235,27 @@ class SmallAttachTransformerNet(nn.Module):
             batch_first=True,
         )
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=layers)
-        self.output = nn.Sequential(
-            nn.LayerNorm(hidden_dim * 2),
-            nn.Linear(hidden_dim * 2, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, 1),
-            nn.Sigmoid(),
-        )
+        if head_kind == "transformer":
+            self.feature_projection = None
+            self.output = nn.Sequential(nn.LayerNorm(hidden_dim), nn.Linear(hidden_dim, 1), nn.Sigmoid())
+        elif head_kind == "hybrid":
+            raw_dim = summary_dim + summary_dim + full_dim + full_dim + path_dim
+            interaction_dim = summary_dim * 4 + full_dim * 2
+            self.feature_projection = nn.Sequential(
+                nn.Linear(raw_dim + interaction_dim, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.GELU(),
+            )
+            self.output = nn.Sequential(
+                nn.LayerNorm(hidden_dim * 2),
+                nn.Linear(hidden_dim * 2, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, 1),
+                nn.Sigmoid(),
+            )
+        else:
+            raise ValueError(f"unknown attach head_kind {head_kind!r}")
 
     def forward(self, inputs: Tensor) -> Tensor:
         new_summary, candidate_summary, new_full, candidate_full, path = split_attach_inputs(
@@ -258,22 +266,6 @@ class SmallAttachTransformerNet(nn.Module):
         )
         batch_size = inputs.shape[0]
         path_summary = fold_resize(path, self.summary_dim)
-        explicit_features = torch.cat(
-            [
-                new_summary,
-                candidate_summary,
-                new_full,
-                candidate_full,
-                path,
-                new_summary * candidate_summary,
-                torch.abs(new_summary - candidate_summary),
-                new_full * candidate_full,
-                torch.abs(new_full - candidate_full),
-                path_summary * candidate_summary,
-                torch.abs(path_summary - candidate_summary),
-            ],
-            dim=-1,
-        )
         tokens = torch.stack(
             [
                 self.summary_projection(new_summary),
@@ -294,6 +286,25 @@ class SmallAttachTransformerNet(nn.Module):
         tokens = torch.cat([cls, tokens], dim=1)
         type_ids = torch.arange(tokens.shape[1], device=inputs.device).unsqueeze(0)
         encoded = self.encoder(tokens + self.type_embedding(type_ids))
+        if self.head_kind == "transformer":
+            return self.output(encoded[:, 0])
+        explicit_features = torch.cat(
+            [
+                new_summary,
+                candidate_summary,
+                new_full,
+                candidate_full,
+                path,
+                new_summary * candidate_summary,
+                torch.abs(new_summary - candidate_summary),
+                new_full * candidate_full,
+                torch.abs(new_full - candidate_full),
+                path_summary * candidate_summary,
+                torch.abs(path_summary - candidate_summary),
+            ],
+            dim=-1,
+        )
+        assert self.feature_projection is not None
         explicit = self.feature_projection(explicit_features)
         return self.output(torch.cat([encoded[:, 0], explicit], dim=-1))
 
@@ -311,6 +322,7 @@ class TorchModelConfig:
     attach_hidden_dim: int = 96
     transformer_layers: int = 2
     transformer_heads: int = 4
+    attach_head_kind: str = "transformer"
 
 
 class TorchTraversalScorer(TraversalScorer):
@@ -476,6 +488,7 @@ def create_model_pair(config: TorchModelConfig) -> tuple[nn.Module, nn.Module]:
                 hidden_dim=config.attach_hidden_dim,
                 layers=config.transformer_layers,
                 heads=config.transformer_heads,
+                head_kind=config.attach_head_kind,
             ),
         )
     raise ValueError(f"unknown model_kind {config.model_kind!r}")

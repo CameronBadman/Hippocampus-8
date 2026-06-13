@@ -31,6 +31,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--model-kind", choices=("mlp", "transformer"), default="mlp")
+    parser.add_argument("--attach-head-kind", choices=("transformer", "hybrid"), default="transformer")
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -38,7 +39,7 @@ def main() -> None:
     device = pick_device(args.device)
     data_dir = Path(args.data_dir)
 
-    config = load_config(data_dir, model_kind=args.model_kind)
+    config = load_config(data_dir, model_kind=args.model_kind, attach_head_kind=args.attach_head_kind)
     traversal_x, traversal_y = load_traversal_examples(data_dir)
     attach_x, attach_y = load_attach_examples(data_dir)
     traversal_ranking = None
@@ -122,7 +123,7 @@ def coalesce(value: float | None, fallback: float) -> float:
     return fallback if value is None else value
 
 
-def load_config(data_dir: Path, *, model_kind: str) -> TorchModelConfig:
+def load_config(data_dir: Path, *, model_kind: str, attach_head_kind: str) -> TorchModelConfig:
     manifest_path = data_dir / "manifest.json"
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -135,8 +136,17 @@ def load_config(data_dir: Path, *, model_kind: str) -> TorchModelConfig:
             path_dim=dimensions["path"],
             scalar_dim=dimensions.get("scalars", 2),
             model_kind=model_kind,
+            attach_head_kind=attach_head_kind,
         )
-    return TorchModelConfig(query_dim=32, summary_dim=32, edge_dim=16, full_dim=64, path_dim=32, model_kind=model_kind)
+    return TorchModelConfig(
+        query_dim=32,
+        summary_dim=32,
+        edge_dim=16,
+        full_dim=64,
+        path_dim=32,
+        model_kind=model_kind,
+        attach_head_kind=attach_head_kind,
+    )
 
 
 def load_traversal_examples(data_dir: Path) -> tuple[torch.Tensor, torch.Tensor]:

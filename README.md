@@ -96,6 +96,16 @@ python3 scripts/train_scorer.py \
   --epochs 50
 ```
 
+Try the experimental hybrid attach head:
+
+```bash
+python3 scripts/train_scorer.py \
+  --model-kind transformer \
+  --attach-head-kind hybrid \
+  --data-dir data/synthetic \
+  --ranking-data-dir data/synthetic_ranked
+```
+
 Train the BERT-style transformer scorer:
 
 ```bash

@@ -23,6 +23,7 @@ def main() -> None:
     parser.add_argument("--attach-listwise-loss-weight", type=float, default=None)
     parser.add_argument("--lr", type=float, default=0.002)
     parser.add_argument("--model-kind", choices=("mlp", "transformer"), default="mlp")
+    parser.add_argument("--attach-head-kind", choices=("transformer", "hybrid"), default="transformer")
     parser.add_argument("--skip-mount", action="store_true")
     args = parser.parse_args()
 
@@ -67,6 +68,8 @@ def main() -> None:
         str(args.lr),
         "--model-kind",
         args.model_kind,
+        "--attach-head-kind",
+        args.attach_head_kind,
         "--output",
         str(checkpoint_path),
     ]
