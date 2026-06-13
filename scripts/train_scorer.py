@@ -27,6 +27,8 @@ def main() -> None:
     parser.add_argument("--attach-regression-loss-weight", type=float, default=1.0)
     parser.add_argument("--traversal-listwise-loss-weight", type=float, default=None)
     parser.add_argument("--attach-listwise-loss-weight", type=float, default=None)
+    parser.add_argument("--hard-summary-negative-weight", type=float, default=1.0)
+    parser.add_argument("--hard-full-negative-weight", type=float, default=1.0)
     parser.add_argument("--lr", type=float, default=2e-3)
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--device", default="auto")
@@ -47,7 +49,11 @@ def main() -> None:
     if args.ranking_data_dir is not None:
         ranking_data_dir = Path(args.ranking_data_dir)
         traversal_ranking = load_traversal_ranking_examples(ranking_data_dir)
-        attach_ranking = load_attach_ranking_examples(ranking_data_dir)
+        attach_ranking = load_attach_ranking_examples(
+            ranking_data_dir,
+            hard_summary_negative_weight=args.hard_summary_negative_weight,
+            hard_full_negative_weight=args.hard_full_negative_weight,
+        )
 
     traversal_model, attach_model = create_model_pair(config)
     traversal_model = traversal_model.to(device)
@@ -186,13 +192,15 @@ def load_attach_examples(data_dir: Path) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.tensor(rows, dtype=torch.float32), torch.tensor(targets, dtype=torch.float32)
 
 
-def load_traversal_ranking_examples(data_dir: Path) -> tuple[torch.Tensor, torch.Tensor]:
+def load_traversal_ranking_examples(data_dir: Path) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     groups = []
     labels = []
+    weights = []
     for path in sorted(data_dir.glob("traversal_ranking*.jsonl")):
         for case in read_jsonl(path):
             group = []
             group_labels = []
+            group_weights = []
             for candidate in case["candidates"]:
                 group.append(
                     case["query"]
@@ -203,20 +211,33 @@ def load_traversal_ranking_examples(data_dir: Path) -> tuple[torch.Tensor, torch
                     + list(traversal_scalars(candidate["confidence"], candidate["hop"]))
                 )
                 group_labels.append(candidate["label"])
+                group_weights.append(1.0)
             groups.append(group)
             labels.append(group_labels)
+            weights.append(group_weights)
     if not groups:
         raise ValueError(f"no traversal_ranking*.jsonl files found in {data_dir}")
-    return torch.tensor(groups, dtype=torch.float32), torch.tensor(labels, dtype=torch.float32)
+    return (
+        torch.tensor(groups, dtype=torch.float32),
+        torch.tensor(labels, dtype=torch.float32),
+        torch.tensor(weights, dtype=torch.float32),
+    )
 
 
-def load_attach_ranking_examples(data_dir: Path) -> tuple[torch.Tensor, torch.Tensor]:
+def load_attach_ranking_examples(
+    data_dir: Path,
+    *,
+    hard_summary_negative_weight: float,
+    hard_full_negative_weight: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     groups = []
     labels = []
+    weights = []
     for path in sorted(data_dir.glob("attach_ranking*.jsonl")):
         for case in read_jsonl(path):
             group = []
             group_labels = []
+            group_weights = []
             for candidate in case["candidates"]:
                 group.append(
                     case["new_summary"]
@@ -226,11 +247,36 @@ def load_attach_ranking_examples(data_dir: Path) -> tuple[torch.Tensor, torch.Te
                     + case["path"]
                 )
                 group_labels.append(candidate["label"])
+                group_weights.append(
+                    attach_candidate_weight(
+                        candidate["kind"],
+                        hard_summary_negative_weight=hard_summary_negative_weight,
+                        hard_full_negative_weight=hard_full_negative_weight,
+                    )
+                )
             groups.append(group)
             labels.append(group_labels)
+            weights.append(group_weights)
     if not groups:
         raise ValueError(f"no attach_ranking*.jsonl files found in {data_dir}")
-    return torch.tensor(groups, dtype=torch.float32), torch.tensor(labels, dtype=torch.float32)
+    return (
+        torch.tensor(groups, dtype=torch.float32),
+        torch.tensor(labels, dtype=torch.float32),
+        torch.tensor(weights, dtype=torch.float32),
+    )
+
+
+def attach_candidate_weight(
+    kind: str,
+    *,
+    hard_summary_negative_weight: float,
+    hard_full_negative_weight: float,
+) -> float:
+    if kind in {"hard_summary_negative", "same_full_wrong_summary_negative"}:
+        return hard_summary_negative_weight
+    if kind in {"hard_full_negative", "same_summary_wrong_full_negative", "path_aligned_wrong_full_negative"}:
+        return hard_full_negative_weight
+    return 1.0
 
 
 def read_jsonl(path: Path):
@@ -253,7 +299,7 @@ def train_regressor(
     seed: int,
     device: torch.device,
     regression_loss_weight: float = 1.0,
-    ranking: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ranking: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ranking_batch_size: int = 128,
     ranking_loss_weight: float = 0.35,
     ranking_margin: float = 0.08,
@@ -361,16 +407,17 @@ def run_ranking_epoch(
 ) -> float:
     total_loss = 0.0
     total_examples = 0
-    for batch_x, batch_labels in loader:
+    for batch_x, batch_labels, batch_weights in loader:
         batch_x = batch_x.to(device)
         batch_labels = batch_labels.to(device)
+        batch_weights = batch_weights.to(device)
         flat_x = batch_x.reshape(-1, batch_x.shape[-1])
         prediction = model(flat_x).reshape(batch_x.shape[0], batch_x.shape[1], -1)
         if score_index is None:
             scores = prediction.squeeze(-1)
         else:
             scores = prediction[..., score_index]
-        pairwise_loss = pairwise_margin_loss(scores, batch_labels, margin=margin)
+        pairwise_loss = pairwise_margin_loss(scores, batch_labels, weights=batch_weights, margin=margin)
         listwise_loss = listwise_softmax_loss(scores, batch_labels)
         loss = pairwise_loss * loss_weight + listwise_loss * listwise_loss_weight
         optimizer.zero_grad(set_to_none=True)
@@ -381,14 +428,26 @@ def run_ranking_epoch(
     return total_loss / max(total_examples, 1)
 
 
-def pairwise_margin_loss(scores: torch.Tensor, labels: torch.Tensor, *, margin: float) -> torch.Tensor:
+def pairwise_margin_loss(
+    scores: torch.Tensor,
+    labels: torch.Tensor,
+    *,
+    weights: torch.Tensor | None = None,
+    margin: float,
+) -> torch.Tensor:
     losses = []
-    for case_scores, case_labels in zip(scores, labels):
+    if weights is None:
+        weights = torch.ones_like(labels)
+    for case_scores, case_labels, case_weights in zip(scores, labels, weights):
         positive = case_scores[case_labels > 0.5]
         negative = case_scores[case_labels <= 0.5]
+        negative_weights = case_weights[case_labels <= 0.5]
         if len(positive) == 0 or len(negative) == 0:
             continue
-        losses.append(torch.relu(margin - positive[:, None] + negative[None, :]).mean())
+        pair_losses = torch.relu(margin - positive[:, None] + negative[None, :])
+        weighted_losses = pair_losses * negative_weights[None, :]
+        denominator = max(len(positive), 1) * negative_weights.sum().clamp_min(1e-12)
+        losses.append(weighted_losses.sum() / denominator)
     if not losses:
         return scores.new_tensor(0.0)
     return torch.stack(losses).mean()

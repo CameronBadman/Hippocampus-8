@@ -21,6 +21,8 @@ def main() -> None:
     parser.add_argument("--listwise-loss-weight", type=float, default=0.0)
     parser.add_argument("--attach-regression-loss-weight", type=float, default=1.0)
     parser.add_argument("--attach-listwise-loss-weight", type=float, default=None)
+    parser.add_argument("--hard-summary-negative-weight", type=float, default=1.0)
+    parser.add_argument("--hard-full-negative-weight", type=float, default=1.0)
     parser.add_argument("--lr", type=float, default=0.002)
     parser.add_argument("--model-kind", choices=("mlp", "transformer"), default="mlp")
     parser.add_argument("--attach-head-kind", choices=("transformer", "hybrid"), default="transformer")
@@ -64,6 +66,10 @@ def main() -> None:
         str(args.listwise_loss_weight),
         "--attach-regression-loss-weight",
         str(args.attach_regression_loss_weight),
+        "--hard-summary-negative-weight",
+        str(args.hard_summary_negative_weight),
+        "--hard-full-negative-weight",
+        str(args.hard_full_negative_weight),
         "--lr",
         str(args.lr),
         "--model-kind",

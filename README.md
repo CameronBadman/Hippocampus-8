@@ -96,6 +96,17 @@ python3 scripts/train_scorer.py \
   --epochs 50
 ```
 
+Weight hard summary/full attach negatives more heavily:
+
+```bash
+python3 scripts/train_scorer.py \
+  --model-kind transformer \
+  --data-dir data/synthetic \
+  --ranking-data-dir data/synthetic_ranked \
+  --hard-summary-negative-weight 3.0 \
+  --hard-full-negative-weight 3.0
+```
+
 Try the experimental hybrid attach head:
 
 ```bash

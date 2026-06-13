@@ -229,7 +229,10 @@ def attach_target(
     summary = cosine01(new_summary, candidate_summary)
     full = cosine01(new_full, candidate_full)
     path = cosine01(path_vector, candidate_summary)
-    return clamp01(summary * 0.60 + full * 0.30 + path * 0.10)
+    summary_full_gate = min(summary, full)
+    joint_match = summary * full
+    path_gate = min(path, summary_full_gate)
+    return clamp01(summary_full_gate * 0.70 + joint_match * 0.20 + path_gate * 0.10)
 
 
 def random_unit_vector(rng: random.Random, dimension: int) -> tuple[float, ...]:
