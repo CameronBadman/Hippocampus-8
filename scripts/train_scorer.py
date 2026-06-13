@@ -9,7 +9,7 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset, random_split
 
-from vector_graph.torch_models import SmallAttachNet, SmallTraversalNet, TorchModelConfig, traversal_scalars
+from vector_graph.torch_models import TorchModelConfig, create_model_pair, traversal_scalars
 
 
 def main() -> None:
@@ -25,6 +25,7 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=2e-3)
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--device", default="auto")
+    parser.add_argument("--model-kind", choices=("mlp", "transformer"), default="mlp")
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -32,7 +33,7 @@ def main() -> None:
     device = pick_device(args.device)
     data_dir = Path(args.data_dir)
 
-    config = load_config(data_dir)
+    config = load_config(data_dir, model_kind=args.model_kind)
     traversal_x, traversal_y = load_traversal_examples(data_dir)
     attach_x, attach_y = load_attach_examples(data_dir)
     traversal_ranking = None
@@ -42,22 +43,12 @@ def main() -> None:
         traversal_ranking = load_traversal_ranking_examples(ranking_data_dir)
         attach_ranking = load_attach_ranking_examples(ranking_data_dir)
 
-    traversal_model = SmallTraversalNet(
-        query_dim=config.query_dim,
-        summary_dim=config.summary_dim,
-        edge_dim=config.edge_dim,
-        path_dim=config.path_dim,
-        scalar_dim=config.scalar_dim,
-        hidden_dim=config.hidden_dim,
-    ).to(device)
-    attach_model = SmallAttachNet(
-        summary_dim=config.summary_dim,
-        full_dim=config.full_dim,
-        path_dim=config.path_dim,
-        hidden_dim=config.attach_hidden_dim,
-    ).to(device)
+    traversal_model, attach_model = create_model_pair(config)
+    traversal_model = traversal_model.to(device)
+    attach_model = attach_model.to(device)
 
     print(f"device: {device}")
+    print(f"model kind: {config.model_kind}")
     print(f"traversal examples: {len(traversal_x)}")
     print(f"attach examples: {len(attach_x)}")
     if traversal_ranking is not None and attach_ranking is not None:
@@ -118,7 +109,7 @@ def pick_device(requested: str) -> torch.device:
     return torch.device(requested)
 
 
-def load_config(data_dir: Path) -> TorchModelConfig:
+def load_config(data_dir: Path, *, model_kind: str) -> TorchModelConfig:
     manifest_path = data_dir / "manifest.json"
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -130,8 +121,9 @@ def load_config(data_dir: Path) -> TorchModelConfig:
             full_dim=dimensions["full"],
             path_dim=dimensions["path"],
             scalar_dim=dimensions.get("scalars", 2),
+            model_kind=model_kind,
         )
-    return TorchModelConfig(query_dim=32, summary_dim=32, edge_dim=16, full_dim=64, path_dim=32)
+    return TorchModelConfig(query_dim=32, summary_dim=32, edge_dim=16, full_dim=64, path_dim=32, model_kind=model_kind)
 
 
 def load_traversal_examples(data_dir: Path) -> tuple[torch.Tensor, torch.Tensor]:

@@ -130,6 +130,71 @@ class TorchModelTests(unittest.TestCase):
                 batch,
             )
 
+    def test_transformer_scorer_runs_and_checkpoint_loads(self) -> None:
+        try:
+            import torch
+            from vector_graph.torch_models import TorchModelConfig, TorchTraversalScorer
+        except ImportError as exc:
+            self.skipTest(str(exc))
+
+        store = GraphStore(max_outgoing_edges=4)
+        root = NodeFrame(node_id="root", summary_vector=embed_text("root graph", 32))
+        child = NodeFrame(node_id="child", summary_vector=embed_text("transformer scorer", 32))
+        store.add_node(root)
+        store.add_node(child)
+        store.add_edge(
+            EdgeFrame(
+                src_id="root",
+                dst_id="child",
+                edge_vector=stable_edge_vector(root.summary_vector, child.summary_vector, 16),
+                confidence=0.75,
+            )
+        )
+
+        config = TorchModelConfig(
+            query_dim=32,
+            summary_dim=32,
+            edge_dim=16,
+            full_dim=64,
+            path_dim=32,
+            model_kind="transformer",
+        )
+        scorer = TorchTraversalScorer.initialized(config, seed=17)
+        query = embed_text("transformer traversal", 32)
+        edge = store.get_edges("root")[0]
+        child_node = store.get_node("child")
+        score = scorer.score_edge(
+            query_vector=query,
+            current_node=root,
+            edge=edge,
+            dst_node=child_node,
+            path_vector=root.summary_vector,
+            hop=0,
+        )
+        self.assertGreaterEqual(score.follow_score, 0.0)
+        self.assertLessEqual(score.follow_score, 1.0)
+
+        with TemporaryDirectory() as tmpdir:
+            checkpoint = Path(tmpdir) / "transformer.pt"
+            torch.save(
+                {
+                    "config": config.__dict__,
+                    "traversal_model": scorer.traversal_model.state_dict(),
+                    "attach_model": scorer.attach_model.state_dict(),
+                },
+                checkpoint,
+            )
+            loaded = TorchTraversalScorer.from_checkpoint(checkpoint)
+            loaded_score = loaded.score_edge(
+                query_vector=query,
+                current_node=root,
+                edge=edge,
+                dst_node=child_node,
+                path_vector=root.summary_vector,
+                hop=0,
+            )
+            self.assertEqual(score, loaded_score)
+
 
 if __name__ == "__main__":
     unittest.main()

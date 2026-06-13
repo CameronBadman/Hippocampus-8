@@ -70,6 +70,17 @@ python3 scripts/train_scorer.py \
   --epochs 30
 ```
 
+Train the BERT-style transformer scorer:
+
+```bash
+python3 scripts/train_scorer.py \
+  --model-kind transformer \
+  --data-dir data/synthetic \
+  --ranking-data-dir data/synthetic_ranked \
+  --epochs 30 \
+  --output models/synthetic_scorer_transformer.pt
+```
+
 Benchmark a trained checkpoint:
 
 ```bash
@@ -93,6 +104,12 @@ In Colab, save checkpoints and benchmark reports to Google Drive:
 
 ```bash
 python3 scripts/colab_train_to_drive.py
+```
+
+For the transformer scorer in Colab:
+
+```bash
+python3 scripts/colab_train_to_drive.py --model-kind transformer
 ```
 
 Default Drive outputs:

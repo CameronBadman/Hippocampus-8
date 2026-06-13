@@ -11,7 +11,9 @@ from typing import Iterable
 
 import torch
 
-from vector_graph.torch_models import SmallAttachNet, SmallTraversalNet, TorchModelConfig, traversal_scalars
+from torch import nn
+
+from vector_graph.torch_models import TorchModelConfig, create_model_pair, traversal_scalars
 
 
 def main() -> None:
@@ -59,23 +61,12 @@ def main() -> None:
         sys.exit(1)
 
 
-def load_models(checkpoint_path: Path, *, device: torch.device) -> tuple[SmallTraversalNet, SmallAttachNet, TorchModelConfig]:
+def load_models(checkpoint_path: Path, *, device: torch.device) -> tuple[nn.Module, nn.Module, TorchModelConfig]:
     checkpoint = torch.load(checkpoint_path, map_location=device)
     config = TorchModelConfig(**checkpoint["config"])
-    traversal_model = SmallTraversalNet(
-        query_dim=config.query_dim,
-        summary_dim=config.summary_dim,
-        edge_dim=config.edge_dim,
-        path_dim=config.path_dim,
-        scalar_dim=config.scalar_dim,
-        hidden_dim=config.hidden_dim,
-    ).to(device)
-    attach_model = SmallAttachNet(
-        summary_dim=config.summary_dim,
-        full_dim=config.full_dim,
-        path_dim=config.path_dim,
-        hidden_dim=config.attach_hidden_dim,
-    ).to(device)
+    traversal_model, attach_model = create_model_pair(config)
+    traversal_model = traversal_model.to(device)
+    attach_model = attach_model.to(device)
     traversal_model.load_state_dict(checkpoint["traversal_model"])
     attach_model.load_state_dict(checkpoint["attach_model"])
     traversal_model.eval()
@@ -83,7 +74,7 @@ def load_models(checkpoint_path: Path, *, device: torch.device) -> tuple[SmallTr
     return traversal_model, attach_model, config
 
 
-def evaluate_traversal(model: SmallTraversalNet, cases: list[dict], *, device: torch.device) -> dict[str, float | int]:
+def evaluate_traversal(model: nn.Module, cases: list[dict], *, device: torch.device) -> dict[str, float | int]:
     rows = []
     spans = []
     labels = []
@@ -116,7 +107,7 @@ def evaluate_traversal(model: SmallTraversalNet, cases: list[dict], *, device: t
     )
 
 
-def evaluate_attach(model: SmallAttachNet, cases: list[dict], *, device: torch.device) -> dict[str, float | int]:
+def evaluate_attach(model: nn.Module, cases: list[dict], *, device: torch.device) -> dict[str, float | int]:
     rows = []
     spans = []
     labels = []

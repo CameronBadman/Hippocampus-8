@@ -126,6 +126,129 @@ class SmallAttachNet(nn.Module):
         return torch.sigmoid(self.layers(features))
 
 
+class SmallTraversalTransformerNet(nn.Module):
+    """Small BERT-style token mixer over vector frames."""
+
+    def __init__(
+        self,
+        *,
+        query_dim: int,
+        summary_dim: int,
+        edge_dim: int,
+        path_dim: int,
+        scalar_dim: int = 2,
+        hidden_dim: int = 128,
+        layers: int = 2,
+        heads: int = 4,
+    ) -> None:
+        super().__init__()
+        self.query_dim = query_dim
+        self.summary_dim = summary_dim
+        self.edge_dim = edge_dim
+        self.path_dim = path_dim
+        self.scalar_dim = scalar_dim
+        self.query_projection = nn.Linear(query_dim, hidden_dim)
+        self.summary_projection = nn.Linear(summary_dim, hidden_dim)
+        self.edge_projection = nn.Linear(edge_dim, hidden_dim)
+        self.path_projection = nn.Linear(path_dim, hidden_dim)
+        self.scalar_projection = nn.Linear(scalar_dim, hidden_dim)
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, hidden_dim))
+        self.type_embedding = nn.Embedding(7, hidden_dim)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=hidden_dim,
+            nhead=heads,
+            dim_feedforward=hidden_dim * 2,
+            dropout=0.0,
+            activation="gelu",
+            batch_first=True,
+        )
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=layers)
+        self.output = nn.Sequential(nn.LayerNorm(hidden_dim), nn.Linear(hidden_dim, 5), nn.Sigmoid())
+
+    def forward(self, inputs: Tensor) -> Tensor:
+        query, current, edge, dst, path, scalars = split_traversal_inputs(
+            inputs,
+            query_dim=self.query_dim,
+            summary_dim=self.summary_dim,
+            edge_dim=self.edge_dim,
+            path_dim=self.path_dim,
+            scalar_dim=self.scalar_dim,
+        )
+        batch_size = inputs.shape[0]
+        tokens = torch.stack(
+            [
+                self.query_projection(query),
+                self.summary_projection(current),
+                self.edge_projection(edge),
+                self.summary_projection(dst),
+                self.path_projection(path),
+                self.scalar_projection(scalars),
+            ],
+            dim=1,
+        )
+        cls = self.cls_token.expand(batch_size, -1, -1)
+        tokens = torch.cat([cls, tokens], dim=1)
+        type_ids = torch.arange(tokens.shape[1], device=inputs.device).unsqueeze(0)
+        encoded = self.encoder(tokens + self.type_embedding(type_ids))
+        return self.output(encoded[:, 0])
+
+
+class SmallAttachTransformerNet(nn.Module):
+    def __init__(
+        self,
+        *,
+        summary_dim: int,
+        full_dim: int,
+        path_dim: int,
+        hidden_dim: int = 96,
+        layers: int = 2,
+        heads: int = 4,
+    ) -> None:
+        super().__init__()
+        self.summary_dim = summary_dim
+        self.full_dim = full_dim
+        self.path_dim = path_dim
+        self.summary_projection = nn.Linear(summary_dim, hidden_dim)
+        self.full_projection = nn.Linear(full_dim, hidden_dim)
+        self.path_projection = nn.Linear(path_dim, hidden_dim)
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, hidden_dim))
+        self.type_embedding = nn.Embedding(6, hidden_dim)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=hidden_dim,
+            nhead=heads,
+            dim_feedforward=hidden_dim * 2,
+            dropout=0.0,
+            activation="gelu",
+            batch_first=True,
+        )
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=layers)
+        self.output = nn.Sequential(nn.LayerNorm(hidden_dim), nn.Linear(hidden_dim, 1), nn.Sigmoid())
+
+    def forward(self, inputs: Tensor) -> Tensor:
+        new_summary, candidate_summary, new_full, candidate_full, path = split_attach_inputs(
+            inputs,
+            summary_dim=self.summary_dim,
+            full_dim=self.full_dim,
+            path_dim=self.path_dim,
+        )
+        batch_size = inputs.shape[0]
+        tokens = torch.stack(
+            [
+                self.summary_projection(new_summary),
+                self.summary_projection(candidate_summary),
+                self.full_projection(new_full),
+                self.full_projection(candidate_full),
+                self.path_projection(path),
+            ],
+            dim=1,
+        )
+        cls = self.cls_token.expand(batch_size, -1, -1)
+        tokens = torch.cat([cls, tokens], dim=1)
+        type_ids = torch.arange(tokens.shape[1], device=inputs.device).unsqueeze(0)
+        encoded = self.encoder(tokens + self.type_embedding(type_ids))
+        return self.output(encoded[:, 0])
+
+
 @dataclass(frozen=True)
 class TorchModelConfig:
     query_dim: int
@@ -134,16 +257,19 @@ class TorchModelConfig:
     full_dim: int
     path_dim: int
     scalar_dim: int = 2
+    model_kind: str = "mlp"
     hidden_dim: int = 128
     attach_hidden_dim: int = 96
+    transformer_layers: int = 2
+    transformer_heads: int = 4
 
 
 class TorchTraversalScorer(TraversalScorer):
     def __init__(
         self,
         *,
-        traversal_model: SmallTraversalNet,
-        attach_model: SmallAttachNet,
+        traversal_model: nn.Module,
+        attach_model: nn.Module,
         config: TorchModelConfig,
         device: str = "cpu",
     ) -> None:
@@ -156,40 +282,14 @@ class TorchTraversalScorer(TraversalScorer):
     def initialized(cls, config: TorchModelConfig, *, seed: int = 0, device: str = "cpu") -> "TorchTraversalScorer":
         torch.manual_seed(seed)
         torch.use_deterministic_algorithms(True)
-        traversal_model = SmallTraversalNet(
-            query_dim=config.query_dim,
-            summary_dim=config.summary_dim,
-            edge_dim=config.edge_dim,
-            path_dim=config.path_dim,
-            scalar_dim=config.scalar_dim,
-            hidden_dim=config.hidden_dim,
-        )
-        attach_model = SmallAttachNet(
-            summary_dim=config.summary_dim,
-            full_dim=config.full_dim,
-            path_dim=config.path_dim,
-            hidden_dim=config.attach_hidden_dim,
-        )
+        traversal_model, attach_model = create_model_pair(config)
         return cls(traversal_model=traversal_model, attach_model=attach_model, config=config, device=device)
 
     @classmethod
     def from_checkpoint(cls, checkpoint_path: str | Path, *, device: str = "cpu") -> "TorchTraversalScorer":
         checkpoint = torch.load(checkpoint_path, map_location=device)
         config = TorchModelConfig(**checkpoint["config"])
-        traversal_model = SmallTraversalNet(
-            query_dim=config.query_dim,
-            summary_dim=config.summary_dim,
-            edge_dim=config.edge_dim,
-            path_dim=config.path_dim,
-            scalar_dim=config.scalar_dim,
-            hidden_dim=config.hidden_dim,
-        )
-        attach_model = SmallAttachNet(
-            summary_dim=config.summary_dim,
-            full_dim=config.full_dim,
-            path_dim=config.path_dim,
-            hidden_dim=config.attach_hidden_dim,
-        )
+        traversal_model, attach_model = create_model_pair(config)
         traversal_model.load_state_dict(checkpoint["traversal_model"])
         attach_model.load_state_dict(checkpoint["attach_model"])
         return cls(traversal_model=traversal_model, attach_model=attach_model, config=config, device=device)
@@ -288,6 +388,48 @@ def _scores_from_values(values: Sequence[float]) -> TraversalScores:
         expand_score=float(values[3]),
         stop_score=float(values[4]),
     )
+
+
+def create_model_pair(config: TorchModelConfig) -> tuple[nn.Module, nn.Module]:
+    if config.model_kind == "mlp":
+        return (
+            SmallTraversalNet(
+                query_dim=config.query_dim,
+                summary_dim=config.summary_dim,
+                edge_dim=config.edge_dim,
+                path_dim=config.path_dim,
+                scalar_dim=config.scalar_dim,
+                hidden_dim=config.hidden_dim,
+            ),
+            SmallAttachNet(
+                summary_dim=config.summary_dim,
+                full_dim=config.full_dim,
+                path_dim=config.path_dim,
+                hidden_dim=config.attach_hidden_dim,
+            ),
+        )
+    if config.model_kind == "transformer":
+        return (
+            SmallTraversalTransformerNet(
+                query_dim=config.query_dim,
+                summary_dim=config.summary_dim,
+                edge_dim=config.edge_dim,
+                path_dim=config.path_dim,
+                scalar_dim=config.scalar_dim,
+                hidden_dim=config.hidden_dim,
+                layers=config.transformer_layers,
+                heads=config.transformer_heads,
+            ),
+            SmallAttachTransformerNet(
+                summary_dim=config.summary_dim,
+                full_dim=config.full_dim,
+                path_dim=config.path_dim,
+                hidden_dim=config.attach_hidden_dim,
+                layers=config.transformer_layers,
+                heads=config.transformer_heads,
+            ),
+        )
+    raise ValueError(f"unknown model_kind {config.model_kind!r}")
 
 
 def traversal_scalars(confidence: float, hop: int, scalar_dim: int = 2) -> tuple[float, ...]:

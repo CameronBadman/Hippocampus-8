@@ -19,6 +19,7 @@ def main() -> None:
     parser.add_argument("--ranking-loss-weight", type=float, default=0.35)
     parser.add_argument("--ranking-margin", type=float, default=0.08)
     parser.add_argument("--lr", type=float, default=0.002)
+    parser.add_argument("--model-kind", choices=("mlp", "transformer"), default="mlp")
     parser.add_argument("--skip-mount", action="store_true")
     args = parser.parse_args()
 
@@ -34,7 +35,7 @@ def main() -> None:
     report_dir.mkdir(parents=True, exist_ok=True)
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    checkpoint_name = args.checkpoint_name or f"synthetic_scorer_ranked_{stamp}.pt"
+    checkpoint_name = args.checkpoint_name or f"synthetic_scorer_{args.model_kind}_ranked_{stamp}.pt"
     checkpoint_path = checkpoint_dir / checkpoint_name
     report_path = report_dir / checkpoint_name.replace(".pt", "_benchmark.json")
 
@@ -57,6 +58,8 @@ def main() -> None:
         str(args.ranking_margin),
         "--lr",
         str(args.lr),
+        "--model-kind",
+        args.model_kind,
         "--output",
         str(checkpoint_path),
     ]
