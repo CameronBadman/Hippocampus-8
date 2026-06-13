@@ -6,10 +6,13 @@ from .frames import EdgeFrame, NodeFrame
 
 
 class GraphStore:
-    def __init__(self, *, max_outgoing_edges: int = 32) -> None:
+    def __init__(self, *, max_outgoing_edges: int = 32, max_expressway_edges: int = 128) -> None:
         if max_outgoing_edges <= 0:
             raise ValueError("max_outgoing_edges must be positive")
+        if max_expressway_edges <= 0:
+            raise ValueError("max_expressway_edges must be positive")
         self.max_outgoing_edges = max_outgoing_edges
+        self.max_expressway_edges = max_expressway_edges
         self._nodes: dict[str, NodeFrame] = {}
         self._outgoing: dict[str, dict[str, EdgeFrame]] = {}
 
@@ -55,11 +58,15 @@ class GraphStore:
 
     def prune_edges(self, src_id: str) -> None:
         outgoing = self._outgoing.setdefault(src_id, {})
+        limit = self.max_expressway_edges if self.is_expressway(src_id) else self.max_outgoing_edges
         kept = sorted(
             outgoing.values(),
             key=lambda edge: (-edge.confidence, edge.created_at, edge.dst_id),
-        )[: self.max_outgoing_edges]
+        )[:limit]
         self._outgoing[src_id] = {edge.dst_id: edge for edge in kept}
+
+    def is_expressway(self, node_id: str) -> bool:
+        return bool(self.get_node(node_id).metadata.get("expressway", False))
 
     def find_nearest_summary(self, query_vector: tuple[float, ...], *, limit: int = 1) -> tuple[NodeFrame, ...]:
         from .vectors import cosine01
@@ -72,4 +79,3 @@ class GraphStore:
         ]
         scored.sort(key=lambda item: (-item[0], item[1]))
         return tuple(item[2] for item in scored[:limit])
-

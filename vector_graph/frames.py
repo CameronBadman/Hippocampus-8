@@ -65,9 +65,13 @@ class TraversalDecision:
     include_score: float
     expand_score: float
     stop_score: float
+    critical_score: float
     read_full: bool
     included: bool
     expanded: bool
+    critical: bool
+    expressway: bool
+    expressway_jumps: int
     path: tuple[str, ...]
 
 
@@ -77,4 +81,3 @@ class TraversalResult:
     included: tuple[TraversalDecision, ...]
     rejected: tuple[TraversalDecision, ...]
     visited: tuple[TraversalDecision, ...]
-

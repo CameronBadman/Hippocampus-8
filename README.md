@@ -37,6 +37,25 @@ python3 -m pip install -e ".[torch]"
 The core graph/controller uses NumPy. The PyTorch scorer is optional and lives
 in `vector_graph.torch_models`.
 
+Traversal modes:
+
+```python
+TraversalConfig(mode="beam", fanout=16, beam_width=32)
+TraversalConfig(mode="single_path", fanout=32, max_hops=12)
+```
+
+Expressway nodes keep relationship semantics implicit in the vector frames, but
+allow a larger bounded edge set for long-range routing:
+
+```python
+store = GraphStore(max_outgoing_edges=32, max_expressway_edges=128)
+hub = NodeFrame(
+    node_id="topic_hub",
+    summary_vector=summary,
+    metadata={"expressway": True},
+)
+```
+
 Generate synthetic training data:
 
 ```bash
