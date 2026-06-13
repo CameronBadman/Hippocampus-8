@@ -37,4 +37,16 @@ python3 -m pip install -e ".[torch]"
 The core graph/controller uses NumPy. The PyTorch scorer is optional and lives
 in `vector_graph.torch_models`.
 
+Generate synthetic training data:
+
+```bash
+python3 scripts/generate_synthetic_training_data.py
+```
+
+Train the PyTorch scorer:
+
+```bash
+python3 scripts/train_scorer.py --data-dir data/synthetic --epochs 12
+```
+
 # Hippocampus-8
