@@ -30,10 +30,18 @@ class SmallTraversalNet(nn.Module):
         summary_dim: int,
         edge_dim: int,
         path_dim: int,
+        scalar_dim: int = 2,
         hidden_dim: int = 128,
     ) -> None:
         super().__init__()
-        input_dim = query_dim + summary_dim + edge_dim + summary_dim + path_dim
+        self.query_dim = query_dim
+        self.summary_dim = summary_dim
+        self.edge_dim = edge_dim
+        self.path_dim = path_dim
+        self.scalar_dim = scalar_dim
+        raw_dim = query_dim + summary_dim + edge_dim + summary_dim + path_dim + scalar_dim
+        interaction_dim = summary_dim * 6 + edge_dim * 2
+        input_dim = raw_dim + interaction_dim
         self.layers = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.GELU(),
@@ -43,21 +51,78 @@ class SmallTraversalNet(nn.Module):
         )
 
     def forward(self, inputs: Tensor) -> Tensor:
-        return torch.sigmoid(self.layers(inputs))
+        query, current, edge, dst, path, scalars = split_traversal_inputs(
+            inputs,
+            query_dim=self.query_dim,
+            summary_dim=self.summary_dim,
+            edge_dim=self.edge_dim,
+            path_dim=self.path_dim,
+            scalar_dim=self.scalar_dim,
+        )
+        edge_query = fold_resize(query, self.edge_dim)
+        features = torch.cat(
+            [
+                query,
+                current,
+                edge,
+                dst,
+                path,
+                scalars,
+                query * dst,
+                torch.abs(query - dst),
+                current * dst,
+                torch.abs(current - dst),
+                path * dst,
+                torch.abs(path - dst),
+                edge_query * edge,
+                torch.abs(edge_query - edge),
+            ],
+            dim=-1,
+        )
+        return torch.sigmoid(self.layers(features))
 
 
 class SmallAttachNet(nn.Module):
     def __init__(self, *, summary_dim: int, full_dim: int, path_dim: int, hidden_dim: int = 96) -> None:
         super().__init__()
-        input_dim = summary_dim + summary_dim + full_dim + full_dim + path_dim
+        self.summary_dim = summary_dim
+        self.full_dim = full_dim
+        self.path_dim = path_dim
+        raw_dim = summary_dim + summary_dim + full_dim + full_dim + path_dim
+        interaction_dim = summary_dim * 4 + full_dim * 2
+        input_dim = raw_dim + interaction_dim
         self.layers = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, 1),
         )
 
     def forward(self, inputs: Tensor) -> Tensor:
-        return torch.sigmoid(self.layers(inputs))
+        new_summary, candidate_summary, new_full, candidate_full, path = split_attach_inputs(
+            inputs,
+            summary_dim=self.summary_dim,
+            full_dim=self.full_dim,
+            path_dim=self.path_dim,
+        )
+        features = torch.cat(
+            [
+                new_summary,
+                candidate_summary,
+                new_full,
+                candidate_full,
+                path,
+                new_summary * candidate_summary,
+                torch.abs(new_summary - candidate_summary),
+                new_full * candidate_full,
+                torch.abs(new_full - candidate_full),
+                path * candidate_summary,
+                torch.abs(path - candidate_summary),
+            ],
+            dim=-1,
+        )
+        return torch.sigmoid(self.layers(features))
 
 
 @dataclass(frozen=True)
@@ -67,6 +132,7 @@ class TorchModelConfig:
     edge_dim: int
     full_dim: int
     path_dim: int
+    scalar_dim: int = 2
     hidden_dim: int = 128
     attach_hidden_dim: int = 96
 
@@ -94,6 +160,7 @@ class TorchTraversalScorer(TraversalScorer):
             summary_dim=config.summary_dim,
             edge_dim=config.edge_dim,
             path_dim=config.path_dim,
+            scalar_dim=config.scalar_dim,
             hidden_dim=config.hidden_dim,
         )
         attach_model = SmallAttachNet(
@@ -114,7 +181,6 @@ class TorchTraversalScorer(TraversalScorer):
         path_vector: Sequence[float],
         hop: int,
     ) -> TraversalScores:
-        del hop
         inputs = self._tensor(
             [
                 resize_vector(query_vector, self.config.query_dim),
@@ -122,6 +188,7 @@ class TorchTraversalScorer(TraversalScorer):
                 resize_vector(edge.edge_vector, self.config.edge_dim),
                 resize_vector(dst_node.summary_vector, self.config.summary_dim),
                 resize_vector(path_vector, self.config.path_dim),
+                traversal_scalars(edge.confidence, hop, self.config.scalar_dim),
             ]
         )
         with torch.inference_mode():
@@ -159,3 +226,44 @@ class TorchTraversalScorer(TraversalScorer):
     def _tensor(self, vectors: Sequence[Sequence[float]]) -> Tensor:
         values = torch.tensor([value for vector in vectors for value in vector], dtype=torch.float32, device=self.device)
         return values.unsqueeze(0)
+
+
+def traversal_scalars(confidence: float, hop: int, scalar_dim: int = 2) -> tuple[float, ...]:
+    values = [max(0.0, min(1.0, float(confidence))), max(0.0, min(1.0, float(hop) / 3.0))]
+    if scalar_dim <= len(values):
+        return tuple(values[:scalar_dim])
+    return tuple(values + [0.0] * (scalar_dim - len(values)))
+
+
+def split_traversal_inputs(
+    inputs: Tensor,
+    *,
+    query_dim: int,
+    summary_dim: int,
+    edge_dim: int,
+    path_dim: int,
+    scalar_dim: int,
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+    sizes = [query_dim, summary_dim, edge_dim, summary_dim, path_dim, scalar_dim]
+    return torch.split(inputs, sizes, dim=-1)
+
+
+def split_attach_inputs(
+    inputs: Tensor,
+    *,
+    summary_dim: int,
+    full_dim: int,
+    path_dim: int,
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+    sizes = [summary_dim, summary_dim, full_dim, full_dim, path_dim]
+    return torch.split(inputs, sizes, dim=-1)
+
+
+def fold_resize(values: Tensor, dimension: int) -> Tensor:
+    if values.shape[-1] == dimension:
+        return values
+    output = values.new_zeros((*values.shape[:-1], dimension))
+    for index in range(values.shape[-1]):
+        output[..., index % dimension] += values[..., index]
+    norm = torch.linalg.vector_norm(output, dim=-1, keepdim=True)
+    return torch.where(norm > 0.0, output / norm.clamp_min(1e-12), output)

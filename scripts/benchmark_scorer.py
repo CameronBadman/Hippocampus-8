@@ -10,7 +10,7 @@ from typing import Iterable
 
 import torch
 
-from vector_graph.torch_models import SmallAttachNet, SmallTraversalNet, TorchModelConfig
+from vector_graph.torch_models import SmallAttachNet, SmallTraversalNet, TorchModelConfig, traversal_scalars
 
 
 def main() -> None:
@@ -53,6 +53,7 @@ def load_models(checkpoint_path: Path, *, device: torch.device) -> tuple[SmallTr
         summary_dim=config.summary_dim,
         edge_dim=config.edge_dim,
         path_dim=config.path_dim,
+        scalar_dim=config.scalar_dim,
         hidden_dim=config.hidden_dim,
     ).to(device)
     attach_model = SmallAttachNet(
@@ -83,6 +84,7 @@ def evaluate_traversal(model: SmallTraversalNet, cases: list[dict], *, device: t
                 + candidate["edge"]
                 + candidate["dst_summary"]
                 + case["path"]
+                + list(traversal_scalars(candidate["confidence"], candidate["hop"]))
             )
             labels.append(candidate["label"])
             kinds.append(candidate["kind"])

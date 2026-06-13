@@ -9,7 +9,7 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset, random_split
 
-from vector_graph.torch_models import SmallAttachNet, SmallTraversalNet, TorchModelConfig
+from vector_graph.torch_models import SmallAttachNet, SmallTraversalNet, TorchModelConfig, traversal_scalars
 
 
 def main() -> None:
@@ -37,6 +37,7 @@ def main() -> None:
         summary_dim=config.summary_dim,
         edge_dim=config.edge_dim,
         path_dim=config.path_dim,
+        scalar_dim=config.scalar_dim,
         hidden_dim=config.hidden_dim,
     ).to(device)
     attach_model = SmallAttachNet(
@@ -105,6 +106,7 @@ def load_config(data_dir: Path) -> TorchModelConfig:
             edge_dim=dimensions["edge"],
             full_dim=dimensions["full"],
             path_dim=dimensions["path"],
+            scalar_dim=dimensions.get("scalars", 2),
         )
     return TorchModelConfig(query_dim=32, summary_dim=32, edge_dim=16, full_dim=64, path_dim=32)
 
@@ -120,6 +122,7 @@ def load_traversal_examples(data_dir: Path) -> tuple[torch.Tensor, torch.Tensor]
                 + example["edge"]
                 + example["dst_summary"]
                 + example["path"]
+                + list(traversal_scalars(example["confidence"], example["hop"]))
             )
             targets.append(example["target"])
     if not rows:
@@ -217,4 +220,3 @@ def run_epoch(
 
 if __name__ == "__main__":
     main()
-

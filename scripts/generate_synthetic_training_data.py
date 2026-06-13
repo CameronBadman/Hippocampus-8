@@ -41,6 +41,7 @@ def main() -> None:
             "edge": EDGE_DIM,
             "full": FULL_DIM,
             "path": PATH_DIM,
+            "scalars": 2,
         },
         "shards": [],
     }

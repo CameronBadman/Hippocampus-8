@@ -6,7 +6,8 @@
     "summary": 32,
     "edge": 16,
     "full": 64,
-    "path": 32
+    "path": 32,
+    "scalars": 2
   },
   "files": {
     "traversal": "traversal_ranking.jsonl",

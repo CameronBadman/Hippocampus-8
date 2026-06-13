@@ -52,6 +52,7 @@ def main() -> None:
             "edge": EDGE_DIM,
             "full": FULL_DIM,
             "path": PATH_DIM,
+            "scalars": 2,
         },
         "files": {
             "traversal": traversal_path.name,
@@ -439,4 +440,3 @@ def negate(vector: Sequence[float]) -> tuple[float, ...]:
 
 if __name__ == "__main__":
     main()
-
