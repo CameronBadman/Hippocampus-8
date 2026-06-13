@@ -55,6 +55,21 @@ Generate hard synthetic benchmarks:
 python3 scripts/generate_synthetic_benchmark.py
 ```
 
+Generate ranked synthetic training cases:
+
+```bash
+python3 scripts/generate_synthetic_ranking_training_data.py
+```
+
+Train with pairwise ranking loss:
+
+```bash
+python3 scripts/train_scorer.py \
+  --data-dir data/synthetic \
+  --ranking-data-dir data/synthetic_ranked \
+  --epochs 30
+```
+
 Benchmark a trained checkpoint:
 
 ```bash

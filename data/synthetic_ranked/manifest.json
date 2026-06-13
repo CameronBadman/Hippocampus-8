@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "seed": 4242,
+  "dimensions": {
+    "query": 32,
+    "summary": 32,
+    "edge": 16,
+    "full": 64,
+    "path": 32,
+    "scalars": 2
+  },
+  "files": {
+    "traversal": "traversal_ranking.jsonl",
+    "attach": "attach_ranking.jsonl"
+  },
+  "cases": {
+    "traversal": 3000,
+    "attach": 2200
+  },
+  "candidate_types": [
+    "positive",
+    "hard_summary_negative",
+    "hard_edge_negative",
+    "adversarial_confidence_negative",
+    "random_negative"
+  ]
+}
