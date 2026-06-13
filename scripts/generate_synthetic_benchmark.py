@@ -67,6 +67,10 @@ def main() -> None:
             "hard_summary_negative",
             "hard_edge_negative",
             "adversarial_confidence_negative",
+            "same_summary_wrong_full_negative",
+            "same_full_wrong_summary_negative",
+            "path_aligned_wrong_full_negative",
+            "near_duplicate_flipped_negative",
             "random_negative",
         ],
     }
@@ -361,9 +365,65 @@ def write_attach_cases(
                     summary_noise=0.18,
                     full_noise=0.18,
                 ),
+                attach_candidate(
+                    rng,
+                    case_index=case_index,
+                    candidate_index=5,
+                    kind="same_summary_wrong_full_negative",
+                    label=0,
+                    new_summary=new_summary,
+                    new_full=new_full,
+                    path_vector=path_vector,
+                    summary_base=topics[new_topic],
+                    full_base=full_topics[(new_topic + rng.randrange(6, len(topics) - 3)) % len(topics)],
+                    summary_noise=0.08,
+                    full_noise=0.10,
+                ),
+                attach_candidate(
+                    rng,
+                    case_index=case_index,
+                    candidate_index=6,
+                    kind="same_full_wrong_summary_negative",
+                    label=0,
+                    new_summary=new_summary,
+                    new_full=new_full,
+                    path_vector=path_vector,
+                    summary_base=topics[(new_topic + rng.randrange(6, len(topics) - 3)) % len(topics)],
+                    full_base=full_topics[new_topic],
+                    summary_noise=0.10,
+                    full_noise=0.08,
+                ),
+                attach_candidate(
+                    rng,
+                    case_index=case_index,
+                    candidate_index=7,
+                    kind="path_aligned_wrong_full_negative",
+                    label=0,
+                    new_summary=new_summary,
+                    new_full=new_full,
+                    path_vector=path_vector,
+                    summary_base=topics[near_topic],
+                    full_base=full_topics[far_topic],
+                    summary_noise=0.16,
+                    full_noise=0.16,
+                ),
+                attach_candidate(
+                    rng,
+                    case_index=case_index,
+                    candidate_index=8,
+                    kind="near_duplicate_flipped_negative",
+                    label=0,
+                    new_summary=new_summary,
+                    new_full=new_full,
+                    path_vector=path_vector,
+                    summary_base=flip_alternating(topics[new_topic]),
+                    full_base=flip_alternating(full_topics[new_topic]),
+                    summary_noise=0.06,
+                    full_noise=0.06,
+                ),
             ]
 
-            for candidate_index in range(5, 12):
+            for candidate_index in range(9, 16):
                 random_topic = rng.randrange(len(topics))
                 candidates.append(
                     attach_candidate(
@@ -436,6 +496,10 @@ def attach_candidate(
 
 def negate(vector: Sequence[float]) -> tuple[float, ...]:
     return tuple(-value for value in vector)
+
+
+def flip_alternating(vector: Sequence[float]) -> tuple[float, ...]:
+    return tuple(-value if index % 2 == 0 else value for index, value in enumerate(vector))
 
 
 if __name__ == "__main__":

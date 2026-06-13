@@ -22,6 +22,10 @@
     "hard_summary_negative",
     "hard_edge_negative",
     "adversarial_confidence_negative",
+    "same_summary_wrong_full_negative",
+    "same_full_wrong_summary_negative",
+    "path_aligned_wrong_full_negative",
+    "near_duplicate_flipped_negative",
     "random_negative"
   ]
 }

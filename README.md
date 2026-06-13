@@ -70,6 +70,18 @@ python3 scripts/train_scorer.py \
   --epochs 30
 ```
 
+Add listwise ranking pressure over each candidate group:
+
+```bash
+python3 scripts/train_scorer.py \
+  --data-dir data/synthetic \
+  --ranking-data-dir data/synthetic_ranked \
+  --ranking-loss-weight 1.0 \
+  --ranking-margin 0.20 \
+  --listwise-loss-weight 0.35 \
+  --epochs 50
+```
+
 Train the BERT-style transformer scorer:
 
 ```bash

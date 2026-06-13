@@ -195,6 +195,22 @@ class TorchModelTests(unittest.TestCase):
             )
             self.assertEqual(score, loaded_score)
 
+    def test_listwise_loss_prefers_positive_rank_mass(self) -> None:
+        try:
+            import torch
+            from scripts.train_scorer import listwise_softmax_loss
+        except ImportError as exc:
+            self.skipTest(str(exc))
+
+        labels = torch.tensor([[1.0, 0.0, 0.0]])
+        good_scores = torch.tensor([[3.0, 1.0, 0.0]])
+        bad_scores = torch.tensor([[0.0, 1.0, 3.0]])
+
+        self.assertLess(
+            float(listwise_softmax_loss(good_scores, labels)),
+            float(listwise_softmax_loss(bad_scores, labels)),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -18,6 +18,7 @@ def main() -> None:
     parser.add_argument("--ranking-batch-size", type=int, default=192)
     parser.add_argument("--ranking-loss-weight", type=float, default=0.35)
     parser.add_argument("--ranking-margin", type=float, default=0.08)
+    parser.add_argument("--listwise-loss-weight", type=float, default=0.0)
     parser.add_argument("--lr", type=float, default=0.002)
     parser.add_argument("--model-kind", choices=("mlp", "transformer"), default="mlp")
     parser.add_argument("--skip-mount", action="store_true")
@@ -56,6 +57,8 @@ def main() -> None:
         str(args.ranking_loss_weight),
         "--ranking-margin",
         str(args.ranking_margin),
+        "--listwise-loss-weight",
+        str(args.listwise_loss_weight),
         "--lr",
         str(args.lr),
         "--model-kind",

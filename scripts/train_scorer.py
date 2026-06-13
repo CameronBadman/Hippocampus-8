@@ -22,6 +22,7 @@ def main() -> None:
     parser.add_argument("--ranking-batch-size", type=int, default=128)
     parser.add_argument("--ranking-loss-weight", type=float, default=0.35)
     parser.add_argument("--ranking-margin", type=float, default=0.08)
+    parser.add_argument("--listwise-loss-weight", type=float, default=0.0)
     parser.add_argument("--lr", type=float, default=2e-3)
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--device", default="auto")
@@ -69,6 +70,7 @@ def main() -> None:
         ranking_batch_size=args.ranking_batch_size,
         ranking_loss_weight=args.ranking_loss_weight,
         ranking_margin=args.ranking_margin,
+        listwise_loss_weight=args.listwise_loss_weight,
         ranking_score_index=0,
     )
     attach_history = train_regressor(
@@ -85,6 +87,7 @@ def main() -> None:
         ranking_batch_size=args.ranking_batch_size,
         ranking_loss_weight=args.ranking_loss_weight,
         ranking_margin=args.ranking_margin,
+        listwise_loss_weight=args.listwise_loss_weight,
         ranking_score_index=None,
     )
 
@@ -233,6 +236,7 @@ def train_regressor(
     ranking_batch_size: int = 128,
     ranking_loss_weight: float = 0.35,
     ranking_margin: float = 0.08,
+    listwise_loss_weight: float = 0.0,
     ranking_score_index: int | None = None,
 ) -> list[dict[str, float]]:
     dataset = TensorDataset(x, y)
@@ -270,6 +274,7 @@ def train_regressor(
                 device=device,
                 loss_weight=ranking_loss_weight,
                 margin=ranking_margin,
+                listwise_loss_weight=listwise_loss_weight,
                 score_index=ranking_score_index,
             )
         model.eval()
@@ -320,6 +325,7 @@ def run_ranking_epoch(
     device: torch.device,
     loss_weight: float,
     margin: float,
+    listwise_loss_weight: float,
     score_index: int | None,
 ) -> float:
     total_loss = 0.0
@@ -333,7 +339,9 @@ def run_ranking_epoch(
             scores = prediction.squeeze(-1)
         else:
             scores = prediction[..., score_index]
-        loss = pairwise_margin_loss(scores, batch_labels, margin=margin) * loss_weight
+        pairwise_loss = pairwise_margin_loss(scores, batch_labels, margin=margin)
+        listwise_loss = listwise_softmax_loss(scores, batch_labels)
+        loss = pairwise_loss * loss_weight + listwise_loss * listwise_loss_weight
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         optimizer.step()
@@ -353,6 +361,17 @@ def pairwise_margin_loss(scores: torch.Tensor, labels: torch.Tensor, *, margin: 
     if not losses:
         return scores.new_tensor(0.0)
     return torch.stack(losses).mean()
+
+
+def listwise_softmax_loss(scores: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+    positive_counts = labels.sum(dim=1, keepdim=True)
+    valid = positive_counts.squeeze(1) > 0.0
+    if not torch.any(valid):
+        return scores.new_tensor(0.0)
+    target = torch.where(positive_counts > 0.0, labels / positive_counts.clamp_min(1.0), labels)
+    log_probs = torch.log_softmax(scores, dim=1)
+    losses = -(target * log_probs).sum(dim=1)
+    return losses[valid].mean()
 
 
 if __name__ == "__main__":
