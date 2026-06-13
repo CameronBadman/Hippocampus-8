@@ -49,4 +49,18 @@ Train the PyTorch scorer:
 python3 scripts/train_scorer.py --data-dir data/synthetic --epochs 12
 ```
 
+Generate hard synthetic benchmarks:
+
+```bash
+python3 scripts/generate_synthetic_benchmark.py
+```
+
+Benchmark a trained checkpoint:
+
+```bash
+python3 scripts/benchmark_scorer.py \
+  --checkpoint models/synthetic_scorer.pt \
+  --benchmark-dir data/benchmarks/synthetic
+```
+
 # Hippocampus-8
