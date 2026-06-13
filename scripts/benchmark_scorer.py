@@ -162,6 +162,12 @@ def ranking_metrics(
     total_positives = 0
     positive_scores = []
     negative_scores = []
+    top1_kind_counts = Counter()
+    score_values_by_kind = {}
+    pair_correct_by_negative_kind = Counter()
+    pair_total_by_negative_kind = Counter()
+    oracle_pair_correct_by_negative_kind = Counter()
+    oracle_pair_total_by_negative_kind = Counter()
 
     for start, end in spans:
         indexes = list(range(start, end))
@@ -169,6 +175,9 @@ def ranking_metrics(
         oracle_ranked = sorted(indexes, key=lambda index: (-oracle_scores[index], index))
         positives = [index for index in indexes if labels[index] == 1]
         total_positives += len(positives)
+        top1_kind_counts[kinds[ranked[0]]] += 1
+        for index in indexes:
+            score_values_by_kind.setdefault(kinds[index], []).append(predictions[index])
         if labels[ranked[0]] == 1:
             top1_correct += 1
         if labels[oracle_ranked[0]] == 1:
@@ -197,14 +206,19 @@ def ranking_metrics(
             for neg in indexes:
                 if labels[neg] == 0:
                     negative_scores.append(predictions[neg])
+                    pair_total_by_negative_kind[kinds[neg]] += 1
+                    if predictions[pos] > predictions[neg]:
+                        pair_correct_by_negative_kind[kinds[neg]] += 1
                     if kinds[neg].startswith("hard") or kinds[neg].startswith("adversarial"):
                         adversarial_total += 1
                         if predictions[pos] > predictions[neg]:
                             adversarial_correct += 1
                     if oracle_scores[pos] > oracle_scores[neg]:
                         oracle_pair_total += 1
+                        oracle_pair_total_by_negative_kind[kinds[neg]] += 1
                         if predictions[pos] > predictions[neg]:
                             oracle_pair_correct += 1
+                            oracle_pair_correct_by_negative_kind[kinds[neg]] += 1
 
     threshold_05 = threshold_metrics(predictions, labels, threshold=0.5)
     best = best_f1(predictions, labels)
@@ -244,6 +258,18 @@ def ranking_metrics(
         "mean_positive_score": mean(positive_scores),
         "mean_negative_score": mean(negative_scores),
         "kind_counts": dict(sorted(kind_counts.items())),
+        "top1_kind_counts": dict(sorted(top1_kind_counts.items())),
+        "mean_score_by_kind": {
+            kind: mean(values) for kind, values in sorted(score_values_by_kind.items())
+        },
+        "pairwise_accuracy_by_negative_kind": ratio_by_key(
+            pair_correct_by_negative_kind,
+            pair_total_by_negative_kind,
+        ),
+        "oracle_pairwise_accuracy_by_negative_kind": ratio_by_key(
+            oracle_pair_correct_by_negative_kind,
+            oracle_pair_total_by_negative_kind,
+        ),
     }
 
 
@@ -342,6 +368,13 @@ def mean(values: Iterable[float]) -> float:
     return sum(values) / len(values)
 
 
+def ratio_by_key(numerators: Counter, denominators: Counter) -> dict[str, float]:
+    return {
+        key: numerators[key] / max(denominator, 1)
+        for key, denominator in sorted(denominators.items())
+    }
+
+
 def pick_device(requested: str) -> torch.device:
     if requested == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -420,6 +453,9 @@ def print_report(report: dict) -> None:
                 print(f"  {key}: {value:.4f}")
             else:
                 print(f"  {key}: {value}")
+        print("  pairwise_accuracy_by_negative_kind:")
+        for kind, value in metrics["pairwise_accuracy_by_negative_kind"].items():
+            print(f"    {kind}: {value:.4f}")
 
 
 if __name__ == "__main__":
