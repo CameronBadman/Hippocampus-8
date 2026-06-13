@@ -19,6 +19,8 @@ def main() -> None:
     parser.add_argument("--ranking-loss-weight", type=float, default=0.35)
     parser.add_argument("--ranking-margin", type=float, default=0.08)
     parser.add_argument("--listwise-loss-weight", type=float, default=0.0)
+    parser.add_argument("--attach-regression-loss-weight", type=float, default=1.0)
+    parser.add_argument("--attach-listwise-loss-weight", type=float, default=None)
     parser.add_argument("--lr", type=float, default=0.002)
     parser.add_argument("--model-kind", choices=("mlp", "transformer"), default="mlp")
     parser.add_argument("--skip-mount", action="store_true")
@@ -59,6 +61,8 @@ def main() -> None:
         str(args.ranking_margin),
         "--listwise-loss-weight",
         str(args.listwise_loss_weight),
+        "--attach-regression-loss-weight",
+        str(args.attach_regression_loss_weight),
         "--lr",
         str(args.lr),
         "--model-kind",
@@ -66,6 +70,8 @@ def main() -> None:
         "--output",
         str(checkpoint_path),
     ]
+    if args.attach_listwise_loss_weight is not None:
+        train_command.extend(["--attach-listwise-loss-weight", str(args.attach_listwise_loss_weight)])
     run(train_command)
 
     benchmark_command = [

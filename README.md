@@ -82,6 +82,20 @@ python3 scripts/train_scorer.py \
   --epochs 50
 ```
 
+Make attach training ranking-first while keeping traversal regression intact:
+
+```bash
+python3 scripts/train_scorer.py \
+  --model-kind transformer \
+  --data-dir data/synthetic \
+  --ranking-data-dir data/synthetic_ranked \
+  --ranking-loss-weight 1.0 \
+  --ranking-margin 0.20 \
+  --attach-regression-loss-weight 0.25 \
+  --attach-listwise-loss-weight 0.15 \
+  --epochs 50
+```
+
 Train the BERT-style transformer scorer:
 
 ```bash

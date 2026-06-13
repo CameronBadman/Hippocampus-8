@@ -23,6 +23,10 @@ def main() -> None:
     parser.add_argument("--ranking-loss-weight", type=float, default=0.35)
     parser.add_argument("--ranking-margin", type=float, default=0.08)
     parser.add_argument("--listwise-loss-weight", type=float, default=0.0)
+    parser.add_argument("--traversal-regression-loss-weight", type=float, default=1.0)
+    parser.add_argument("--attach-regression-loss-weight", type=float, default=1.0)
+    parser.add_argument("--traversal-listwise-loss-weight", type=float, default=None)
+    parser.add_argument("--attach-listwise-loss-weight", type=float, default=None)
     parser.add_argument("--lr", type=float, default=2e-3)
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--device", default="auto")
@@ -66,11 +70,12 @@ def main() -> None:
         lr=args.lr,
         seed=args.seed,
         device=device,
+        regression_loss_weight=args.traversal_regression_loss_weight,
         ranking=traversal_ranking,
         ranking_batch_size=args.ranking_batch_size,
         ranking_loss_weight=args.ranking_loss_weight,
         ranking_margin=args.ranking_margin,
-        listwise_loss_weight=args.listwise_loss_weight,
+        listwise_loss_weight=coalesce(args.traversal_listwise_loss_weight, args.listwise_loss_weight),
         ranking_score_index=0,
     )
     attach_history = train_regressor(
@@ -83,11 +88,12 @@ def main() -> None:
         lr=args.lr,
         seed=args.seed + 1,
         device=device,
+        regression_loss_weight=args.attach_regression_loss_weight,
         ranking=attach_ranking,
         ranking_batch_size=args.ranking_batch_size,
         ranking_loss_weight=args.ranking_loss_weight,
         ranking_margin=args.ranking_margin,
-        listwise_loss_weight=args.listwise_loss_weight,
+        listwise_loss_weight=coalesce(args.attach_listwise_loss_weight, args.listwise_loss_weight),
         ranking_score_index=None,
     )
 
@@ -110,6 +116,10 @@ def pick_device(requested: str) -> torch.device:
     if requested == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return torch.device(requested)
+
+
+def coalesce(value: float | None, fallback: float) -> float:
+    return fallback if value is None else value
 
 
 def load_config(data_dir: Path, *, model_kind: str) -> TorchModelConfig:
@@ -232,6 +242,7 @@ def train_regressor(
     lr: float,
     seed: int,
     device: torch.device,
+    regression_loss_weight: float = 1.0,
     ranking: tuple[torch.Tensor, torch.Tensor] | None = None,
     ranking_batch_size: int = 128,
     ranking_loss_weight: float = 0.35,
@@ -264,7 +275,16 @@ def train_regressor(
 
     for epoch in range(1, epochs + 1):
         model.train()
-        train_loss = run_epoch(model, train_loader, loss_fn, optimizer=optimizer, device=device)
+        train_loss = 0.0
+        if regression_loss_weight > 0.0:
+            train_loss = run_epoch(
+                model,
+                train_loader,
+                loss_fn,
+                optimizer=optimizer,
+                device=device,
+                loss_weight=regression_loss_weight,
+            )
         ranking_loss = 0.0
         if ranking_loader is not None:
             ranking_loss = run_ranking_epoch(
@@ -300,6 +320,7 @@ def run_epoch(
     *,
     optimizer: torch.optim.Optimizer | None,
     device: torch.device,
+    loss_weight: float = 1.0,
 ) -> float:
     total_loss = 0.0
     total_examples = 0
@@ -307,7 +328,7 @@ def run_epoch(
         batch_x = batch_x.to(device)
         batch_y = batch_y.to(device)
         prediction = model(batch_x)
-        loss = loss_fn(prediction, batch_y)
+        loss = loss_fn(prediction, batch_y) * loss_weight
         if optimizer is not None:
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
