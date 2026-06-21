@@ -64,6 +64,10 @@ def main() -> None:
     parser.add_argument("--max-hops", type=int, default=2)
     parser.add_argument("--fanout", type=int, default=16)
     parser.add_argument("--beam-width", type=int, default=16)
+    parser.add_argument("--max-visited", type=int, default=512)
+    parser.add_argument("--include-threshold", type=float, default=0.58)
+    parser.add_argument("--expand-threshold", type=float, default=0.52)
+    parser.add_argument("--read-full-threshold", type=float, default=0.70)
     parser.add_argument("--mode", choices=["beam", "single_path"], default="beam")
     parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--device", default="auto")
@@ -104,7 +108,10 @@ def main() -> None:
             fanout=args.fanout,
             beam_width=args.beam_width,
             mode=args.mode,
-            max_visited=512,
+            max_visited=args.max_visited,
+            include_threshold=args.include_threshold,
+            expand_threshold=args.expand_threshold,
+            read_full_threshold=args.read_full_threshold,
         ),
     )
 
@@ -153,6 +160,10 @@ def main() -> None:
             "fanout": args.fanout,
             "beam_width": args.beam_width,
             "mode": args.mode,
+            "max_visited": args.max_visited,
+            "include_threshold": args.include_threshold,
+            "expand_threshold": args.expand_threshold,
+            "read_full_threshold": args.read_full_threshold,
         },
         "checkpoint": args.checkpoint,
         "device": str(device),
