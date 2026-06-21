@@ -181,6 +181,15 @@ python3 scripts/benchmark_scorer.py \
   --min-attach-precision-at-1 0.85
 ```
 
+Benchmark deterministic index lookup plus torch traversal scoring:
+
+```bash
+python3 scripts/benchmark_indexed_traversal.py \
+  --nodes 50000 \
+  --queries 100 \
+  --checkpoint models/synthetic_scorer_transformer.pt
+```
+
 In Colab, save checkpoints and benchmark reports to Google Drive:
 
 ```bash
