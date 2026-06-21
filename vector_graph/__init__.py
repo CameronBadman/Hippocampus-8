@@ -1,4 +1,5 @@
 from .frames import EdgeFrame, NodeFrame, TraversalDecision, TraversalResult
+from .index import TraversalIndex, TraversalIndexConfig, TraversalIndexHit
 from .insertion import InsertConfig, insert_node
 from .scorer import HeuristicTraversalScorer
 from .store import GraphStore
@@ -14,8 +15,10 @@ __all__ = [
     "TraversalConfig",
     "TraversalController",
     "TraversalDecision",
+    "TraversalIndex",
+    "TraversalIndexConfig",
+    "TraversalIndexHit",
     "TraversalResult",
     "embed_text",
     "insert_node",
 ]
-

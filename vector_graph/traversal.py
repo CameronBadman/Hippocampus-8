@@ -54,10 +54,20 @@ class TraversalController:
         self.scorer = scorer
         self.config = config or TraversalConfig()
 
-    def traverse(self, *, query_vector: Sequence[float], seed_id: str) -> TraversalResult:
+    def traverse(
+        self,
+        *,
+        query_vector: Sequence[float],
+        seed_id: str,
+        extra_seed_ids: Sequence[str] = (),
+    ) -> TraversalResult:
         seed_node = self.store.get_node(seed_id)
-        frontier: list[tuple[str, tuple[str, ...], int]] = [(seed_id, (seed_id,), 0)]
-        seen = {seed_id}
+        seed_ids = tuple(dict.fromkeys((seed_id, *sorted(extra_seed_ids))))
+        frontier: list[tuple[str, tuple[str, ...], int]] = [
+            (frontier_seed_id, (frontier_seed_id,), 0)
+            for frontier_seed_id in seed_ids
+        ]
+        seen = set(seed_ids)
         decisions: dict[str, TraversalDecision] = {}
         full_reads = 0
 

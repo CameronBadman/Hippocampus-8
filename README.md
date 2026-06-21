@@ -56,6 +56,21 @@ hub = NodeFrame(
 )
 ```
 
+For deterministic indexed starts, use the compact traversal index. It hashes
+16-dimensional traversal vectors with fixed seeded projections and returns
+bounded seed ids in stable order:
+
+```python
+index = TraversalIndex(config=TraversalIndexConfig(dimension=16, seed=17))
+index.add_nodes(store.nodes())
+seed_ids = index.seed_ids(query_traversal_vector, limit=8)
+result = controller.traverse(
+    query_vector=query_vector,
+    seed_id=seed_id,
+    extra_seed_ids=seed_ids,
+)
+```
+
 Generate synthetic training data:
 
 ```bash

@@ -10,6 +10,8 @@ from vector_graph import (
     NodeFrame,
     TraversalConfig,
     TraversalController,
+    TraversalIndex,
+    TraversalIndexConfig,
     embed_text,
     insert_node,
 )
@@ -264,6 +266,81 @@ class VectorGraphTests(unittest.TestCase):
         self.assertTrue(hub.expressway)
         self.assertEqual(hub.expressway_jumps, 1)
         self.assertIn("target", {decision.node_id for decision in result.visited})
+
+    def test_traversal_index_is_deterministic_and_bounded(self) -> None:
+        frames = [
+            node("alpha", "vector traversal target"),
+            node("beta", "database storage unrelated"),
+            node("gamma", "edge frame relationship"),
+            node("delta", "transformer scoring model"),
+        ]
+        config = TraversalIndexConfig(dimension=16, table_count=6, bits_per_table=4, seed=123)
+        first = TraversalIndex(config=config)
+        second = TraversalIndex(config=config)
+        first.add_nodes(frames)
+        second.add_nodes(reversed(frames))
+        query = embed_text("vector traversal target", 32)
+
+        first_hits = first.query(query, limit=3)
+        second_hits = second.query(query, limit=3)
+
+        self.assertEqual(first_hits, second_hits)
+        self.assertLessEqual(len(first_hits), 3)
+        self.assertEqual(first_hits[0].node_id, "alpha")
+
+    def test_traversal_index_uses_compact_metadata_vector(self) -> None:
+        target_vector = [1.0] + [0.0] * 15
+        distractor_vector = [-1.0] + [0.0] * 15
+        frames = [
+            NodeFrame(
+                node_id="target",
+                summary_vector=embed_text("unrelated summary", 32),
+                metadata={"traversal_vector": target_vector},
+            ),
+            NodeFrame(
+                node_id="distractor",
+                summary_vector=embed_text("target words in summary", 32),
+                metadata={"traversal_vector": distractor_vector},
+            ),
+        ]
+        index = TraversalIndex(config=TraversalIndexConfig(dimension=16, table_count=4, bits_per_table=4, seed=7))
+        index.add_nodes(frames)
+
+        self.assertEqual(index.seed_ids(target_vector, limit=1), ("target",))
+
+    def test_traversal_can_start_from_index_seed_ids(self) -> None:
+        store = GraphStore(max_outgoing_edges=2)
+        for frame in [
+            node("root", "cold start root"),
+            node("indexed", "indexed useful region"),
+            node("target", "target reached from index"),
+        ]:
+            store.add_node(frame)
+        edge(store, "indexed", "target", 0.90)
+        scorer = FixedTraversalScorer(
+            {
+                "target": TraversalScores(
+                    follow_score=0.9,
+                    read_full_score=0.2,
+                    include_score=0.8,
+                    expand_score=0.0,
+                    stop_score=0.2,
+                )
+            }
+        )
+        controller = TraversalController(
+            store=store,
+            scorer=scorer,
+            config=TraversalConfig(max_hops=1, fanout=2, beam_width=2),
+        )
+
+        result = controller.traverse(
+            query_vector=embed_text("target reached from index", 32),
+            seed_id="root",
+            extra_seed_ids=("indexed",),
+        )
+
+        self.assertEqual([decision.node_id for decision in result.visited], ["target"])
 
 
 if __name__ == "__main__":
