@@ -55,6 +55,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Benchmark indexed traversal plus torch transformer scoring.")
     parser.add_argument("--nodes", type=int, default=50_000)
     parser.add_argument("--queries", type=int, default=100)
+    parser.add_argument("--warmup-queries", type=int, default=5)
     parser.add_argument("--clusters", type=int, default=256)
     parser.add_argument("--edges-per-node", type=int, default=16)
     parser.add_argument("--seed-limit", type=int, default=4)
@@ -74,6 +75,8 @@ def main() -> None:
         raise ValueError("--nodes must be positive")
     if args.queries <= 0:
         raise ValueError("--queries must be positive")
+    if args.warmup_queries < 0:
+        raise ValueError("--warmup-queries must be non-negative")
 
     device = pick_device(args.device)
     graph_start = time.perf_counter()
@@ -107,50 +110,40 @@ def main() -> None:
 
     query_rng = np.random.default_rng(args.seed + 999)
     query_labels = query_rng.integers(0, len(centers), size=args.queries)
+    warmup_labels = query_rng.integers(0, len(centers), size=args.warmup_queries)
+    for label in warmup_labels:
+        run_query(
+            store=store,
+            index=index,
+            controller=controller,
+            scorer=scorer,
+            counting_scorer=counting_scorer,
+            centers=centers,
+            label=int(label),
+            query_rng=query_rng,
+            seed_limit=args.seed_limit,
+        )
+
     rows = []
     for label in query_labels:
-        traversal_query = np.asarray(
-            normalize(centers[int(label)] + query_rng.normal(scale=0.08, size=16).astype(np.float32)),
-            dtype=np.float32,
-        )
-        query_vector = resize_vector(traversal_query, scorer.config.query_dim)
-
-        counting_scorer.reset()
-        start = time.perf_counter()
-        seed_ids = index.seed_ids(traversal_query, limit=args.seed_limit)
-        index_ms = (time.perf_counter() - start) * 1000.0
-        if not seed_ids:
-            rows.append(empty_row(index_ms=index_ms))
-            continue
-
-        start = time.perf_counter()
-        result = controller.traverse(
-            query_vector=query_vector,
-            seed_id=seed_ids[0],
-            extra_seed_ids=seed_ids[1:],
-        )
-        traversal_ms = (time.perf_counter() - start) * 1000.0
-        visited_clusters = [store.get_node(decision.node_id).metadata["cluster"] for decision in result.visited]
-        included_clusters = [store.get_node(decision.node_id).metadata["cluster"] for decision in result.included]
         rows.append(
-            {
-                "index_ms": index_ms,
-                "traversal_ms": traversal_ms,
-                "total_ms": index_ms + traversal_ms,
-                "model_ms": counting_scorer.model_ms,
-                "score_batches": counting_scorer.score_batches,
-                "scored_candidates": counting_scorer.scored_candidates,
-                "seed_count": len(seed_ids),
-                "visited": len(result.visited),
-                "included": len(result.included),
-                "visited_cluster_purity": purity(visited_clusters, int(label)),
-                "included_cluster_purity": purity(included_clusters, int(label)),
-            }
+            run_query(
+                store=store,
+                index=index,
+                controller=controller,
+                scorer=scorer,
+                counting_scorer=counting_scorer,
+                centers=centers,
+                label=int(label),
+                query_rng=query_rng,
+                seed_limit=args.seed_limit,
+            )
         )
 
     report = {
         "nodes": args.nodes,
         "queries": args.queries,
+        "warmup_queries": args.warmup_queries,
         "clusters": args.clusters,
         "edges_per_node": args.edges_per_node,
         "seed_limit": args.seed_limit,
@@ -223,6 +216,55 @@ def build_graph(
                 )
 
     return store, index, centers
+
+
+def run_query(
+    *,
+    store: GraphStore,
+    index: TraversalIndex,
+    controller: TraversalController,
+    scorer: TorchTraversalScorer,
+    counting_scorer: CountingScorer,
+    centers: np.ndarray,
+    label: int,
+    query_rng: np.random.Generator,
+    seed_limit: int,
+) -> dict[str, float | int]:
+    traversal_query = np.asarray(
+        normalize(centers[label] + query_rng.normal(scale=0.08, size=16).astype(np.float32)),
+        dtype=np.float32,
+    )
+    query_vector = resize_vector(traversal_query, scorer.config.query_dim)
+
+    counting_scorer.reset()
+    start = time.perf_counter()
+    seed_ids = index.seed_ids(traversal_query, limit=seed_limit)
+    index_ms = (time.perf_counter() - start) * 1000.0
+    if not seed_ids:
+        return empty_row(index_ms=index_ms)
+
+    start = time.perf_counter()
+    result = controller.traverse(
+        query_vector=query_vector,
+        seed_id=seed_ids[0],
+        extra_seed_ids=seed_ids[1:],
+    )
+    traversal_ms = (time.perf_counter() - start) * 1000.0
+    visited_clusters = [store.get_node(decision.node_id).metadata["cluster"] for decision in result.visited]
+    included_clusters = [store.get_node(decision.node_id).metadata["cluster"] for decision in result.included]
+    return {
+        "index_ms": index_ms,
+        "traversal_ms": traversal_ms,
+        "total_ms": index_ms + traversal_ms,
+        "model_ms": counting_scorer.model_ms,
+        "score_batches": counting_scorer.score_batches,
+        "scored_candidates": counting_scorer.scored_candidates,
+        "seed_count": len(seed_ids),
+        "visited": len(result.visited),
+        "included": len(result.included),
+        "visited_cluster_purity": purity(visited_clusters, label),
+        "included_cluster_purity": purity(included_clusters, label),
+    }
 
 
 def load_scorer(checkpoint: str | None, *, device: str) -> TorchTraversalScorer:
