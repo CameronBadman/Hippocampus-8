@@ -77,6 +77,34 @@ Generate synthetic training data:
 python3 scripts/generate_synthetic_training_data.py
 ```
 
+Generate prompt-ready teacher traversal episodes:
+
+```bash
+python3 scripts/generate_teacher_graph_episodes.py \
+  --output-dir data/teacher_episodes
+```
+
+After a teacher model adds `qwen_teacher` labels to each candidate, convert the
+episodes into the scorer's existing regression and ranking formats:
+
+```bash
+python3 scripts/convert_teacher_episodes.py \
+  --episodes-dir data/teacher_episodes \
+  --output-data-dir data/teacher_scorer \
+  --output-ranking-dir data/teacher_ranked
+```
+
+The converter falls back to deterministic `bootstrap_teacher` labels, so the
+same path can be smoke-tested before running Qwen:
+
+```bash
+python3 scripts/train_scorer.py \
+  --model-kind transformer \
+  --data-dir data/teacher_scorer \
+  --ranking-data-dir data/teacher_ranked \
+  --epochs 30
+```
+
 Train the PyTorch scorer:
 
 ```bash
