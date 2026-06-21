@@ -16,6 +16,17 @@ DEFAULT_BASE_URLS = (
     "https://dashscope.aliyuncs.com/compatible-mode/v1",
     "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
 )
+NON_RETRYABLE_ERROR_MARKERS = (
+    "AllocationQuota.FreeTierOnly",
+    "free tier of the model has been exhausted",
+    "InvalidApiKey",
+    "Invalid API-key",
+    "Unauthorized",
+)
+
+
+class NonRetryableTeacherError(RuntimeError):
+    pass
 
 
 def main() -> None:
@@ -137,6 +148,8 @@ def label_episode(
                     json_mode=json_mode,
                 )
                 return parse_labels(content, expected_ids=[candidate["id"] for candidate in episode["candidates"]])
+            except NonRetryableTeacherError:
+                raise
             except Exception as exc:  # noqa: BLE001 - script should retry API and parse failures.
                 last_error = exc
         if attempt < retries:
@@ -185,9 +198,18 @@ def call_chat_completion(
             body = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"{url} returned HTTP {exc.code}: {body[:800]}") from exc
+        message = f"{url} returned HTTP {exc.code}: {body[:800]}"
+        if is_non_retryable_http_error(exc.code, body):
+            raise NonRetryableTeacherError(message) from exc
+        raise RuntimeError(message) from exc
     data = json.loads(body)
     return data["choices"][0]["message"]["content"]
+
+
+def is_non_retryable_http_error(status_code: int, body: str) -> bool:
+    if status_code == 401:
+        return True
+    return status_code == 403 and any(marker in body for marker in NON_RETRYABLE_ERROR_MARKERS)
 
 
 def build_prompt(episode: dict) -> str:

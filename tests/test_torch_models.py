@@ -311,6 +311,19 @@ class TorchModelTests(unittest.TestCase):
             [1, 4, 7],
         )
 
+    def test_qwen_labeler_marks_quota_errors_non_retryable(self) -> None:
+        from scripts.label_teacher_episodes_qwen import is_non_retryable_http_error
+
+        self.assertTrue(
+            is_non_retryable_http_error(
+                403,
+                '{"error":{"code":"AllocationQuota.FreeTierOnly","message":"free tier exhausted"}}',
+            )
+        )
+        self.assertTrue(is_non_retryable_http_error(401, '{"error":{"message":"bad key"}}'))
+        self.assertFalse(is_non_retryable_http_error(429, '{"error":{"message":"rate limited"}}'))
+        self.assertFalse(is_non_retryable_http_error(500, '{"error":{"message":"server failed"}}'))
+
     def test_qwen_shard_runner_marks_short_success_as_partial(self) -> None:
         from scripts.run_qwen_label_shards import classify_shard_status
 
