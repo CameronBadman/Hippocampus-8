@@ -311,6 +311,22 @@ class TorchModelTests(unittest.TestCase):
             [1, 4, 7],
         )
 
+    def test_qwen_shard_runner_marks_short_success_as_partial(self) -> None:
+        from scripts.run_qwen_label_shards import classify_shard_status
+
+        self.assertEqual(
+            classify_shard_status(returncode=0, line_count=8, expected_per_shard=8),
+            "complete",
+        )
+        self.assertEqual(
+            classify_shard_status(returncode=0, line_count=7, expected_per_shard=8),
+            "partial",
+        )
+        self.assertEqual(
+            classify_shard_status(returncode=1, line_count=8, expected_per_shard=8),
+            "error",
+        )
+
 
 def read_jsonl(path: Path):
     with path.open("r", encoding="utf-8") as handle:
