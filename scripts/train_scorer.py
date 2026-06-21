@@ -21,7 +21,9 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--ranking-batch-size", type=int, default=128)
     parser.add_argument("--ranking-loss-weight", type=float, default=0.35)
-    parser.add_argument("--ranking-margin", type=float, default=0.08)
+    parser.add_argument("--ranking-margin", type=float, default=0.15)
+    parser.add_argument("--ranking-min-delta", type=float, default=0.10)
+    parser.add_argument("--listwise-temperature", type=float, default=0.15)
     parser.add_argument("--listwise-loss-weight", type=float, default=0.0)
     parser.add_argument("--traversal-regression-loss-weight", type=float, default=1.0)
     parser.add_argument("--attach-regression-loss-weight", type=float, default=1.0)
@@ -67,7 +69,7 @@ def main() -> None:
         print(f"traversal ranking cases: {len(traversal_ranking[0])}")
         print(f"attach ranking cases: {len(attach_ranking[0])}")
 
-    traversal_history = train_regressor(
+    traversal_history, traversal_best_state = train_regressor(
         name="traversal",
         model=traversal_model,
         x=traversal_x,
@@ -82,10 +84,12 @@ def main() -> None:
         ranking_batch_size=args.ranking_batch_size,
         ranking_loss_weight=args.ranking_loss_weight,
         ranking_margin=args.ranking_margin,
+        ranking_min_delta=args.ranking_min_delta,
         listwise_loss_weight=coalesce(args.traversal_listwise_loss_weight, args.listwise_loss_weight),
+        listwise_temperature=args.listwise_temperature,
         ranking_score_index=0,
     )
-    attach_history = train_regressor(
+    attach_history, attach_best_state = train_regressor(
         name="attach",
         model=attach_model,
         x=attach_x,
@@ -100,7 +104,9 @@ def main() -> None:
         ranking_batch_size=args.ranking_batch_size,
         ranking_loss_weight=args.ranking_loss_weight,
         ranking_margin=args.ranking_margin,
+        ranking_min_delta=args.ranking_min_delta,
         listwise_loss_weight=coalesce(args.attach_listwise_loss_weight, args.listwise_loss_weight),
+        listwise_temperature=args.listwise_temperature,
         ranking_score_index=None,
     )
 
@@ -109,10 +115,11 @@ def main() -> None:
     torch.save(
         {
             "config": config.__dict__,
-            "traversal_model": traversal_model.state_dict(),
-            "attach_model": attach_model.state_dict(),
+            "traversal_model": traversal_best_state,
+            "attach_model": attach_best_state,
             "traversal_history": traversal_history,
             "attach_history": attach_history,
+            "selection": "best_validation_loss",
         },
         output,
     )
@@ -210,8 +217,8 @@ def load_traversal_ranking_examples(data_dir: Path) -> tuple[torch.Tensor, torch
                     + case["path"]
                     + list(traversal_scalars(candidate["confidence"], candidate["hop"]))
                 )
-                group_labels.append(candidate["label"])
-                group_weights.append(1.0)
+                group_labels.append(float(candidate.get("rank_target", candidate["label"])))
+                group_weights.append(float(candidate.get("weight", 1.0)))
             groups.append(group)
             labels.append(group_labels)
             weights.append(group_weights)
@@ -246,9 +253,10 @@ def load_attach_ranking_examples(
                     + candidate["candidate_full"]
                     + case["path"]
                 )
-                group_labels.append(candidate["label"])
+                group_labels.append(float(candidate.get("rank_target", candidate["label"])))
                 group_weights.append(
-                    attach_candidate_weight(
+                    float(candidate.get("weight", 1.0))
+                    * attach_candidate_weight(
                         candidate["kind"],
                         hard_summary_negative_weight=hard_summary_negative_weight,
                         hard_full_negative_weight=hard_full_negative_weight,
@@ -303,9 +311,11 @@ def train_regressor(
     ranking_batch_size: int = 128,
     ranking_loss_weight: float = 0.35,
     ranking_margin: float = 0.08,
+    ranking_min_delta: float = 0.10,
     listwise_loss_weight: float = 0.0,
+    listwise_temperature: float = 0.15,
     ranking_score_index: int | None = None,
-) -> list[dict[str, float]]:
+) -> tuple[list[dict[str, float]], dict[str, torch.Tensor]]:
     dataset = TensorDataset(x, y)
     validation_size = max(1, int(len(dataset) * 0.15))
     train_size = len(dataset) - validation_size
@@ -328,6 +338,8 @@ def train_regressor(
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     loss_fn = nn.MSELoss()
     history = []
+    best_validation_loss = float("inf")
+    best_state = clone_state_dict(model)
 
     for epoch in range(1, epochs + 1):
         model.train()
@@ -350,23 +362,35 @@ def train_regressor(
                 device=device,
                 loss_weight=ranking_loss_weight,
                 margin=ranking_margin,
+                min_delta=ranking_min_delta,
                 listwise_loss_weight=listwise_loss_weight,
+                listwise_temperature=listwise_temperature,
                 score_index=ranking_score_index,
             )
         model.eval()
         with torch.inference_mode():
             validation_loss = run_epoch(model, validation_loader, loss_fn, optimizer=None, device=device)
+        validation_score_mean, validation_score_std = prediction_stats(model, validation_loader, device=device)
+        if validation_loss < best_validation_loss:
+            best_validation_loss = validation_loss
+            best_state = clone_state_dict(model)
         history.append(
             {
                 "epoch": epoch,
                 "train_loss": train_loss,
                 "ranking_loss": ranking_loss,
                 "validation_loss": validation_loss,
+                "validation_score_mean": validation_score_mean,
+                "validation_score_std": validation_score_std,
+                "best_validation_loss": best_validation_loss,
             }
         )
-        print(f"{name} epoch {epoch:02d}: train={train_loss:.6f} rank={ranking_loss:.6f} val={validation_loss:.6f}")
+        print(
+            f"{name} epoch {epoch:02d}: train={train_loss:.6f} rank={ranking_loss:.6f} "
+            f"val={validation_loss:.6f} score_mean={validation_score_mean:.4f} score_std={validation_score_std:.4f}"
+        )
 
-    return history
+    return history, best_state
 
 
 def run_epoch(
@@ -394,6 +418,17 @@ def run_epoch(
     return total_loss / max(total_examples, 1)
 
 
+def prediction_stats(model: nn.Module, loader: DataLoader, *, device: torch.device) -> tuple[float, float]:
+    outputs = []
+    with torch.inference_mode():
+        for batch_x, _ in loader:
+            outputs.append(model(batch_x.to(device)).detach().cpu().reshape(-1))
+    if not outputs:
+        return 0.0, 0.0
+    values = torch.cat(outputs)
+    return float(values.mean()), float(values.std(unbiased=False))
+
+
 def run_ranking_epoch(
     model: nn.Module,
     loader: DataLoader,
@@ -402,7 +437,9 @@ def run_ranking_epoch(
     device: torch.device,
     loss_weight: float,
     margin: float,
+    min_delta: float,
     listwise_loss_weight: float,
+    listwise_temperature: float,
     score_index: int | None,
 ) -> float:
     total_loss = 0.0
@@ -417,8 +454,8 @@ def run_ranking_epoch(
             scores = prediction.squeeze(-1)
         else:
             scores = prediction[..., score_index]
-        pairwise_loss = pairwise_margin_loss(scores, batch_labels, weights=batch_weights, margin=margin)
-        listwise_loss = listwise_softmax_loss(scores, batch_labels)
+        pairwise_loss = pairwise_margin_loss(scores, batch_labels, weights=batch_weights, margin=margin, min_delta=min_delta)
+        listwise_loss = listwise_softmax_loss(scores, batch_labels, temperature=listwise_temperature)
         loss = pairwise_loss * loss_weight + listwise_loss * listwise_loss_weight
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
@@ -434,34 +471,40 @@ def pairwise_margin_loss(
     *,
     weights: torch.Tensor | None = None,
     margin: float,
+    min_delta: float = 0.0,
 ) -> torch.Tensor:
     losses = []
     if weights is None:
         weights = torch.ones_like(labels)
     for case_scores, case_labels, case_weights in zip(scores, labels, weights):
-        positive = case_scores[case_labels > 0.5]
-        negative = case_scores[case_labels <= 0.5]
-        negative_weights = case_weights[case_labels <= 0.5]
-        if len(positive) == 0 or len(negative) == 0:
+        label_diff = case_labels[:, None] - case_labels[None, :]
+        mask = label_diff >= min_delta
+        if not torch.any(mask):
             continue
-        pair_losses = torch.relu(margin - positive[:, None] + negative[None, :])
-        weighted_losses = pair_losses * negative_weights[None, :]
-        denominator = max(len(positive), 1) * negative_weights.sum().clamp_min(1e-12)
-        losses.append(weighted_losses.sum() / denominator)
+        score_diff = case_scores[:, None] - case_scores[None, :]
+        pair_weights = torch.sqrt(case_weights[:, None].clamp_min(0.0) * case_weights[None, :].clamp_min(0.0))
+        pair_losses = torch.relu(margin * label_diff.clamp_min(0.0) - score_diff)
+        weighted_losses = pair_losses * pair_weights * mask
+        losses.append(weighted_losses.sum() / (pair_weights * mask).sum().clamp_min(1e-12))
     if not losses:
         return scores.new_tensor(0.0)
     return torch.stack(losses).mean()
 
 
-def listwise_softmax_loss(scores: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-    positive_counts = labels.sum(dim=1, keepdim=True)
-    valid = positive_counts.squeeze(1) > 0.0
+def listwise_softmax_loss(scores: torch.Tensor, labels: torch.Tensor, *, temperature: float = 0.15) -> torch.Tensor:
+    label_mass = labels.sum(dim=1, keepdim=True)
+    valid = label_mass.squeeze(1) > 0.0
     if not torch.any(valid):
         return scores.new_tensor(0.0)
-    target = torch.where(positive_counts > 0.0, labels / positive_counts.clamp_min(1.0), labels)
+    centered = labels - labels.max(dim=1, keepdim=True).values
+    target = torch.softmax(centered / max(temperature, 1e-6), dim=1)
     log_probs = torch.log_softmax(scores, dim=1)
     losses = -(target * log_probs).sum(dim=1)
     return losses[valid].mean()
+
+
+def clone_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
+    return {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
 
 
 if __name__ == "__main__":

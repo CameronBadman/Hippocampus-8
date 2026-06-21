@@ -124,12 +124,15 @@ def write_ranking_files(episodes: Sequence[dict], *, ranking_dir: Path, teacher_
                 teacher = candidate_teacher(candidate, teacher_key)
                 dst_summary = embed_text(candidate["node_summary"], 32)
                 dst_full = embed_text(candidate.get("node_full") or candidate["node_summary"], 64)
-                label = 1 if teacher["follow"] >= 0.65 or teacher["include"] >= 0.65 else 0
+                traversal_target = float(teacher["follow"])
+                attach_target = float(teacher["include"])
                 traversal_candidates.append(
                     {
                         "id": candidate["id"],
                         "kind": candidate["kind"],
-                        "label": label,
+                        "label": hard_label(traversal_target),
+                        "rank_target": round(traversal_target, 6),
+                        "weight": rank_weight(traversal_target),
                         "dst_summary": round_vector(dst_summary),
                         "edge": round_vector(stable_edge_vector(current_summary, dst_summary, 16)),
                         "confidence": candidate["confidence"],
@@ -141,10 +144,12 @@ def write_ranking_files(episodes: Sequence[dict], *, ranking_dir: Path, teacher_
                     {
                         "id": candidate["id"],
                         "kind": candidate["kind"],
-                        "label": label,
+                        "label": hard_label(attach_target),
+                        "rank_target": round(attach_target, 6),
+                        "weight": rank_weight(attach_target),
                         "candidate_summary": round_vector(dst_summary),
                         "candidate_full": round_vector(dst_full),
-                        "oracle": round(float(teacher["include"]), 6),
+                        "oracle": round(attach_target, 6),
                     }
                 )
             traversal_output.write(
@@ -197,6 +202,14 @@ def candidate_teacher(candidate: dict, teacher_key: str) -> dict[str, float]:
 
 def teacher_target(teacher: dict[str, float]) -> tuple[float, float, float, float, float]:
     return teacher["follow"], teacher["read_full"], teacher["include"], teacher["expand"], teacher["stop"]
+
+
+def hard_label(score: float) -> int:
+    return 1 if score >= 0.65 else 0
+
+
+def rank_weight(score: float) -> float:
+    return round(0.5 + abs(float(score) - 0.5) * 2.0, 6)
 
 
 def episode_path_vector(episode: dict):

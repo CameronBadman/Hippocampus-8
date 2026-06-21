@@ -246,6 +246,71 @@ class TorchModelTests(unittest.TestCase):
             float(listwise_softmax_loss(bad_scores, labels)),
         )
 
+    def test_pairwise_loss_uses_continuous_teacher_order(self) -> None:
+        try:
+            import torch
+            from scripts.train_scorer import pairwise_margin_loss
+        except ImportError as exc:
+            self.skipTest(str(exc))
+
+        labels = torch.tensor([[0.9, 0.4, 0.1]])
+        good_scores = torch.tensor([[0.8, 0.5, 0.2]])
+        bad_scores = torch.tensor([[0.2, 0.5, 0.8]])
+
+        self.assertLess(
+            float(pairwise_margin_loss(good_scores, labels, margin=0.15, min_delta=0.1)),
+            float(pairwise_margin_loss(bad_scores, labels, margin=0.15, min_delta=0.1)),
+        )
+
+    def test_teacher_converter_separates_follow_and_include_rank_targets(self) -> None:
+        from scripts.convert_teacher_episodes import write_ranking_files
+
+        with TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            episode = {
+                "id": "episode-1",
+                "query": "find include only node",
+                "expected_topic": "topic:a",
+                "current_node": {"summary": "current"},
+                "path": [{"summary": "current"}],
+                "candidates": [
+                    {
+                        "id": "candidate-1",
+                        "kind": "positive",
+                        "node_summary": "include only",
+                        "node_full": "include only full",
+                        "confidence": 0.9,
+                        "hop": 0,
+                        "qwen_teacher": {
+                            "follow": 0.0,
+                            "read_full": 0.8,
+                            "include": 0.9,
+                            "expand": 0.7,
+                            "stop": 0.0,
+                        },
+                    }
+                ],
+            }
+
+            write_ranking_files([episode], ranking_dir=output_dir, teacher_key="qwen_teacher")
+            traversal = next(read_jsonl(output_dir / "traversal_ranking.jsonl"))
+            attach = next(read_jsonl(output_dir / "attach_ranking.jsonl"))
+
+        self.assertEqual(traversal["candidates"][0]["label"], 0)
+        self.assertEqual(traversal["candidates"][0]["rank_target"], 0.0)
+        self.assertEqual(attach["candidates"][0]["label"], 1)
+        self.assertEqual(attach["candidates"][0]["rank_target"], 0.9)
+
+
+def read_jsonl(path: Path):
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            stripped = line.strip()
+            if stripped:
+                import json
+
+                yield json.loads(stripped)
+
 
 if __name__ == "__main__":
     unittest.main()
