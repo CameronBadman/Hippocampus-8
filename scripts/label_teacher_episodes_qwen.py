@@ -25,6 +25,9 @@ def main() -> None:
     parser.add_argument("--model", default=os.environ.get("QWEN_MODEL", "qwen-plus"))
     parser.add_argument("--api-key-env", default="DASHSCOPE_API_KEY")
     parser.add_argument("--base-url", default=os.environ.get("QWEN_BASE_URL") or os.environ.get("DASHSCOPE_BASE_URL"))
+    parser.add_argument("--output-file", default=None)
+    parser.add_argument("--shard-index", type=int, default=None)
+    parser.add_argument("--shard-count", type=int, default=None)
     parser.add_argument("--max-episodes", type=int, default=None)
     parser.add_argument("--request-timeout", type=float, default=90.0)
     parser.add_argument("--retries", type=int, default=3)
@@ -41,20 +44,24 @@ def main() -> None:
     episodes_dir = Path(args.episodes_dir)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / "episodes_000.jsonl"
+    validate_shard_args(args.shard_index, args.shard_count)
+    output_name = args.output_file or default_output_name(args.shard_index)
+    output_path = output_dir / output_name
     if args.overwrite and output_path.exists():
         output_path.unlink()
 
     done_ids = read_done_ids(output_path)
     base_urls = [args.base_url] if args.base_url else list(DEFAULT_BASE_URLS)
-    processed = 0
+    selected = 0
     labeled = 0
 
     with output_path.open("a", encoding="utf-8") as output:
-        for episode in read_episodes(episodes_dir):
-            if args.max_episodes is not None and processed >= args.max_episodes:
+        for episode_index, episode in enumerate(read_episodes(episodes_dir)):
+            if not episode_in_shard(episode_index, shard_index=args.shard_index, shard_count=args.shard_count):
+                continue
+            if args.max_episodes is not None and selected >= args.max_episodes:
                 break
-            processed += 1
+            selected += 1
             if episode["id"] in done_ids:
                 continue
             if args.dry_run:
@@ -78,8 +85,31 @@ def main() -> None:
             labeled += 1
             print(f"labeled {episode['id']} ({len(episode['candidates'])} candidates)")
 
-    write_manifest(output_dir, source_dir=episodes_dir, model=args.model, labeled_count=len(done_ids))
-    print(f"labeled {labeled} new episodes into {output_dir}")
+    write_manifest(output_dir, source_dir=episodes_dir, model=args.model)
+    print(f"selected {selected} episodes, labeled {labeled} new episodes into {output_path}")
+
+
+def validate_shard_args(shard_index: int | None, shard_count: int | None) -> None:
+    if shard_index is None and shard_count is None:
+        return
+    if shard_index is None or shard_count is None:
+        raise ValueError("--shard-index and --shard-count must be provided together")
+    if shard_count <= 0:
+        raise ValueError("--shard-count must be positive")
+    if shard_index < 0 or shard_index >= shard_count:
+        raise ValueError("--shard-index must be in [0, shard_count)")
+
+
+def default_output_name(shard_index: int | None) -> str:
+    if shard_index is None:
+        return "episodes_000.jsonl"
+    return f"episodes_{shard_index:03d}.jsonl"
+
+
+def episode_in_shard(episode_index: int, *, shard_index: int | None, shard_count: int | None) -> bool:
+    if shard_index is None or shard_count is None:
+        return True
+    return episode_index % shard_count == shard_index
 
 
 def label_episode(
@@ -264,16 +294,25 @@ def read_jsonl(path: Path) -> Iterable[dict]:
                 yield json.loads(stripped)
 
 
-def write_manifest(output_dir: Path, *, source_dir: Path, model: str, labeled_count: int) -> None:
+def write_manifest(output_dir: Path, *, source_dir: Path, model: str) -> None:
+    episode_files = sorted(path.name for path in output_dir.glob("episodes_*.jsonl"))
+    labeled_count = count_unique_episode_ids(output_dir)
     manifest = {
         "schema_version": 1,
         "kind": "qwen_teacher_episodes",
         "source_dir": str(source_dir),
         "teacher_model": model,
         "episodes": labeled_count,
-        "episode_files": ["episodes_000.jsonl"],
+        "episode_files": episode_files,
     }
     (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def count_unique_episode_ids(output_dir: Path) -> int:
+    episode_ids = set()
+    for path in sorted(output_dir.glob("episodes_*.jsonl")):
+        episode_ids.update(episode["id"] for episode in read_jsonl(path))
+    return len(episode_ids)
 
 
 def clamp01(value: float) -> float:

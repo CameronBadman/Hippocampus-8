@@ -301,6 +301,16 @@ class TorchModelTests(unittest.TestCase):
         self.assertEqual(attach["candidates"][0]["label"], 1)
         self.assertEqual(attach["candidates"][0]["rank_target"], 0.9)
 
+    def test_qwen_labeler_shard_helpers_are_deterministic(self) -> None:
+        from scripts.label_teacher_episodes_qwen import default_output_name, episode_in_shard
+
+        self.assertEqual(default_output_name(None), "episodes_000.jsonl")
+        self.assertEqual(default_output_name(7), "episodes_007.jsonl")
+        self.assertEqual(
+            [index for index in range(10) if episode_in_shard(index, shard_index=1, shard_count=3)],
+            [1, 4, 7],
+        )
+
 
 def read_jsonl(path: Path):
     with path.open("r", encoding="utf-8") as handle:
