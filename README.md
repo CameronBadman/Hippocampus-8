@@ -88,8 +88,12 @@ After a teacher model adds `qwen_teacher` labels to each candidate, convert the
 episodes into the scorer's existing regression and ranking formats:
 
 ```bash
-python3 scripts/convert_teacher_episodes.py \
+python3 scripts/label_teacher_episodes_qwen.py \
   --episodes-dir data/teacher_episodes \
+  --output-dir data/qwen_teacher_episodes
+
+python3 scripts/convert_teacher_episodes.py \
+  --episodes-dir data/qwen_teacher_episodes \
   --output-data-dir data/teacher_scorer \
   --output-ranking-dir data/teacher_ranked
 ```
