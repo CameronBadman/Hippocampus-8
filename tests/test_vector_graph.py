@@ -308,6 +308,31 @@ class VectorGraphTests(unittest.TestCase):
 
         self.assertEqual(index.seed_ids(target_vector, limit=1), ("target",))
 
+    def test_traversal_index_removes_replaced_nodes(self) -> None:
+        old_vector = [1.0] + [0.0] * 15
+        new_vector = [-1.0] + [0.0] * 15
+        index = TraversalIndex(config=TraversalIndexConfig(dimension=16, table_count=4, bits_per_table=4, seed=7))
+
+        index.add_node(
+            NodeFrame(
+                node_id="moving",
+                summary_vector=embed_text("moving node", 32),
+                metadata={"traversal_vector": old_vector},
+            )
+        )
+        self.assertEqual(index.seed_ids(old_vector, limit=1), ("moving",))
+
+        index.add_node(
+            NodeFrame(
+                node_id="moving",
+                summary_vector=embed_text("moving node", 32),
+                metadata={"traversal_vector": new_vector},
+            )
+        )
+
+        self.assertEqual(index.seed_ids(new_vector, limit=1), ("moving",))
+        self.assertEqual(index.seed_ids(old_vector, limit=1), ())
+
     def test_traversal_can_start_from_index_seed_ids(self) -> None:
         store = GraphStore(max_outgoing_edges=2)
         for frame in [

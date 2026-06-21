@@ -8,7 +8,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from .frames import NodeFrame
-from .vectors import Vector, as_vector, cosine01, resize_vector
+from .vectors import Vector, as_vector, resize_vector
 
 
 @dataclass(frozen=True)
@@ -43,33 +43,44 @@ class TraversalIndex:
         self.config = config or TraversalIndexConfig()
         self.vector_fn = vector_fn or self._default_vector
         self._projections = self._build_projections()
-        self._vectors: dict[str, Vector] = {}
+        self._node_ids: list[str] = []
+        self._id_to_index: dict[str, int] = {}
+        self._vectors: list[Vector] = []
+        self._vector_matrix: NDArray[np.float32] | None = None
+        self._matrix_dirty = False
         self._node_buckets: dict[str, tuple[tuple[int, int], ...]] = {}
-        self._buckets: dict[tuple[int, int], set[str]] = defaultdict(set)
+        self._buckets: dict[tuple[int, int], set[int]] = defaultdict(set)
 
     def add_node(self, node: NodeFrame) -> None:
-        if node.node_id in self._vectors:
+        if node.node_id in self._id_to_index:
             self.remove_node(node.node_id)
 
         vector = self._index_vector(self.vector_fn(node))
         buckets = self._buckets_for(vector)
-        self._vectors[node.node_id] = vector
+        node_index = len(self._node_ids)
+        self._node_ids.append(node.node_id)
+        self._id_to_index[node.node_id] = node_index
+        self._vectors.append(vector)
+        self._matrix_dirty = True
         self._node_buckets[node.node_id] = buckets
         for bucket in buckets:
-            self._buckets[bucket].add(node.node_id)
+            self._buckets[bucket].add(node_index)
 
     def add_nodes(self, nodes: Iterable[NodeFrame]) -> None:
         for node in nodes:
             self.add_node(node)
 
     def remove_node(self, node_id: str) -> None:
+        node_index = self._id_to_index.pop(node_id, None)
+        if node_index is None:
+            return
+
         buckets = self._node_buckets.pop(node_id, ())
-        self._vectors.pop(node_id, None)
         for bucket in buckets:
             members = self._buckets.get(bucket)
             if members is None:
                 continue
-            members.discard(node_id)
+            members.discard(node_index)
             if not members:
                 del self._buckets[bucket]
 
@@ -78,27 +89,41 @@ class TraversalIndex:
             raise ValueError("limit must be positive")
 
         query_vector = self._index_vector(vector)
-        bucket_matches: dict[str, int] = {}
+        bucket_matches: dict[int, int] = {}
         for bucket in self._buckets_for(query_vector):
-            for node_id in self._buckets.get(bucket, ()):
-                bucket_matches[node_id] = bucket_matches.get(node_id, 0) + 1
+            for node_index in self._buckets.get(bucket, ()):
+                bucket_matches[node_index] = bucket_matches.get(node_index, 0) + 1
 
-        hits = [
+        if not bucket_matches:
+            return ()
+
+        candidate_indices = np.fromiter(bucket_matches.keys(), dtype=np.int64)
+        matches = np.fromiter(
+            (bucket_matches[int(node_index)] for node_index in candidate_indices),
+            dtype=np.float32,
+            count=len(candidate_indices),
+        )
+        candidate_vectors = self._matrix()[candidate_indices]
+        cosine_scores = (candidate_vectors @ np.asarray(query_vector, dtype=np.float32).reshape(-1) + 1.0) / 2.0
+        scores = cosine_scores * 0.75 + (matches / self.config.table_count) * 0.25
+        ranked = sorted(
+            zip(candidate_indices.tolist(), scores.tolist(), matches.astype(np.int32).tolist()),
+            key=lambda item: (-item[1], -item[2], self._node_ids[item[0]]),
+        )
+        return tuple(
             TraversalIndexHit(
-                node_id=node_id,
-                score=self._score(query_vector, self._vectors[node_id], matches),
-                bucket_matches=matches,
+                node_id=self._node_ids[node_index],
+                score=float(score),
+                bucket_matches=int(bucket_matches),
             )
-            for node_id, matches in bucket_matches.items()
-        ]
-        hits.sort(key=lambda hit: (-hit.score, -hit.bucket_matches, hit.node_id))
-        return tuple(hits[:limit])
+            for node_index, score, bucket_matches in ranked[:limit]
+        )
 
     def seed_ids(self, vector: Sequence[float], *, limit: int = 8) -> tuple[str, ...]:
         return tuple(hit.node_id for hit in self.query(vector, limit=limit))
 
     def __len__(self) -> int:
-        return len(self._vectors)
+        return len(self._id_to_index)
 
     def _default_vector(self, node: NodeFrame) -> Sequence[float]:
         traversal_vector = node.metadata.get("traversal_vector")
@@ -121,10 +146,6 @@ class TraversalIndex:
             buckets.append((table_index, bucket_id))
         return tuple(buckets)
 
-    def _score(self, query_vector: Sequence[float], node_vector: Sequence[float], bucket_matches: int) -> float:
-        match_score = bucket_matches / self.config.table_count
-        return cosine01(query_vector, node_vector) * 0.75 + match_score * 0.25
-
     def _build_projections(self) -> NDArray[np.float32]:
         rng = np.random.default_rng(self.config.seed)
         projections = rng.standard_normal(
@@ -134,3 +155,12 @@ class TraversalIndex:
         norms = np.linalg.norm(projections, axis=2, keepdims=True)
         norms[norms == 0.0] = 1.0
         return (projections / norms).astype(np.float32)
+
+    def _matrix(self) -> NDArray[np.float32]:
+        if self._vector_matrix is None or self._matrix_dirty:
+            if self._vectors:
+                self._vector_matrix = np.vstack(self._vectors).astype(np.float32)
+            else:
+                self._vector_matrix = np.empty((0, self.config.dimension), dtype=np.float32)
+            self._matrix_dirty = False
+        return self._vector_matrix
