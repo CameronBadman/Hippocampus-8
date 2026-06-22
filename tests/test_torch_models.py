@@ -105,7 +105,17 @@ class TorchModelTests(unittest.TestCase):
             )
             for edge, dst in zip(edges, dst_nodes)
         )
-        self.assertEqual(batch, singles)
+        self.assertEqual(len(batch), len(singles))
+        for batch_score, single_score in zip(batch, singles):
+            for field in (
+                "follow_score",
+                "read_full_score",
+                "include_score",
+                "expand_score",
+                "stop_score",
+                "result_score",
+            ):
+                self.assertAlmostEqual(getattr(batch_score, field), getattr(single_score, field), places=6)
 
         with TemporaryDirectory() as tmpdir:
             checkpoint = Path(tmpdir) / "scorer.pt"

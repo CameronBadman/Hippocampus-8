@@ -174,7 +174,8 @@ def call_chat_completion(
                 "role": "system",
                 "content": (
                     "You are a deterministic graph traversal teacher. Label candidates for a small student "
-                    "model. Return only valid JSON. Scores must be calibrated floats from 0 to 1."
+                    "model. Use all provided relationship metadata, not just lexical overlap. Return only "
+                    "valid JSON. Scores must be calibrated floats from 0 to 1."
                 ),
             },
             {"role": "user", "content": prompt},
@@ -220,9 +221,16 @@ def build_prompt(episode: dict) -> str:
                 "id": candidate["id"],
                 "parent_id": candidate["parent_id"],
                 "dst_id": candidate["dst_id"],
+                "candidate_kind": candidate.get("kind", ""),
+                "source_topic": candidate.get("source_topic", ""),
+                "destination_topic": candidate.get("destination_topic", candidate.get("node_topic", "")),
+                "destination_plain_topic": candidate.get("destination_plain_topic", ""),
+                "destination_terms": candidate.get("destination_terms", []),
                 "edge_summary": candidate.get("edge_summary", ""),
                 "edge_confidence": candidate.get("confidence", 0.0),
                 "hop": candidate.get("hop", 0),
+                "retrieval_reason": candidate.get("retrieval_reason", ""),
+                "relation": candidate.get("relation", {}),
                 "node_summary": candidate.get("node_summary", ""),
                 "node_full": candidate.get("node_full", ""),
             }
@@ -230,10 +238,15 @@ def build_prompt(episode: dict) -> str:
     task = {
         "episode_id": episode["id"],
         "query": episode["query"],
+        "query_intent": episode.get("query_intent", {}),
+        "expected_topic": episode.get("expected_topic", ""),
         "path": [
             {
                 "node_id": node.get("node_id"),
                 "summary": node.get("summary", ""),
+                "topic": node.get("topic", ""),
+                "plain_topic": node.get("plain_topic", ""),
+                "terms": node.get("terms", []),
             }
             for node in episode.get("path", [])
         ],
@@ -241,6 +254,9 @@ def build_prompt(episode: dict) -> str:
             "node_id": episode.get("current_node", {}).get("node_id"),
             "summary": episode.get("current_node", {}).get("summary", ""),
             "full": episode.get("current_node", {}).get("full", ""),
+            "topic": episode.get("current_node", {}).get("topic", ""),
+            "plain_topic": episode.get("current_node", {}).get("plain_topic", ""),
+            "terms": episode.get("current_node", {}).get("terms", []),
         },
         "candidates": candidates,
     }
@@ -252,9 +268,13 @@ def build_prompt(episode: dict) -> str:
         "- include: include the destination node in the answer set.\n"
         "- expand: continue exploring from the destination node.\n"
         "- stop: stop this branch after this candidate.\n"
-        "Prefer candidates that answer the query and keep the path on task. Penalize wrong-intent lexical overlap, "
-        "generic bridges, and candidates that are only loosely related. Make the strongest relevant candidates close "
-        "to 1 and clear negatives close to 0.\n"
+        "Decision policy:\n"
+        "- Use query_intent/expected_topic as the target for this synthetic teacher task.\n"
+        "- A destination that matches the target topic and terms should usually receive high follow/include/expand.\n"
+        "- A candidate with similar words but the wrong destination topic is a hard negative: prefer read_full over follow/include.\n"
+        "- A bridge or expressway-style edge should get follow only when it moves toward the target topic; otherwise stop it.\n"
+        "- Keep follow and include separate: follow means useful next traversal step, include means useful answer node.\n"
+        "- Calibrate aggressively: strongest target candidates near 0.9-1.0, clear off-topic negatives near 0.0-0.1.\n"
         'Return exactly: {"candidates":[{"id":"...","follow":0.0,"read_full":0.0,"include":0.0,"expand":0.0,"stop":0.0}]}.\n'
         "Do not include markdown, prose, or extra keys.\n\n"
         f"Task JSON:\n{json.dumps(task, ensure_ascii=True, separators=(',', ':'))}"

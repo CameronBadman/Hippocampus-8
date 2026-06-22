@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable, Sequence, cast
 
 from .frames import EdgeFrame, NodeFrame
 from .scorer import TraversalScorer, path_vector_for
@@ -47,12 +48,24 @@ def insert_node(
     candidate_ids.update(decision.node_id for decision in result.visited)
     candidate_ids.discard(node.node_id)
 
+    sorted_candidate_ids = sorted(candidate_ids)
+    candidates = [store.get_node(candidate_id) for candidate_id in sorted_candidate_ids]
+    path_vectors = [
+        path_vector_for(
+            [store.get_node(path_id) for path_id in _path_for(result, candidate_id, seed_id)],
+            len(node.summary_vector),
+        )
+        for candidate_id in sorted_candidate_ids
+    ]
+    scores = _score_attach_batch(
+        scorer=scorer,
+        new_node=node,
+        candidate_nodes=candidates,
+        path_vectors=path_vectors,
+    )
+
     scored = []
-    for candidate_id in sorted(candidate_ids):
-        candidate = store.get_node(candidate_id)
-        path_nodes = [store.get_node(path_id) for path_id in _path_for(result, candidate_id, seed_id)]
-        path_vector = path_vector_for(path_nodes, len(node.summary_vector))
-        score = scorer.score_attach(new_node=node, candidate_node=candidate, path_vector=path_vector)
+    for candidate_id, candidate, score in zip(sorted_candidate_ids, candidates, scores):
         if score >= config.attach_threshold:
             scored.append((score, candidate_id, candidate))
 
@@ -86,3 +99,31 @@ def _path_for(result, node_id: str, seed_id: str) -> tuple[str, ...]:
             return decision.path
     return (seed_id, node_id)
 
+
+def _score_attach_batch(
+    *,
+    scorer: TraversalScorer,
+    new_node: NodeFrame,
+    candidate_nodes: Sequence[NodeFrame],
+    path_vectors: Sequence[Sequence[float]],
+) -> tuple[float, ...]:
+    if len(candidate_nodes) != len(path_vectors):
+        raise ValueError("candidate_nodes and path_vectors must have the same length")
+    score_attach_batch = getattr(scorer, "score_attach_batch", None)
+    if score_attach_batch is not None:
+        return tuple(
+            float(score)
+            for score in cast(Callable[..., Sequence[float]], score_attach_batch)(
+                new_node=new_node,
+                candidate_nodes=candidate_nodes,
+                path_vectors=path_vectors,
+            )
+        )
+    return tuple(
+        scorer.score_attach(
+            new_node=new_node,
+            candidate_node=candidate,
+            path_vector=path_vector,
+        )
+        for candidate, path_vector in zip(candidate_nodes, path_vectors)
+    )
