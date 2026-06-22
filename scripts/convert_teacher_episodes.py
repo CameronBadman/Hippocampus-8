@@ -125,6 +125,7 @@ def write_ranking_files(episodes: Sequence[dict], *, ranking_dir: Path, teacher_
                 dst_summary = embed_text(candidate["node_summary"], 32)
                 dst_full = embed_text(candidate.get("node_full") or candidate["node_summary"], 64)
                 traversal_target = float(teacher["follow"])
+                result_target = float(teacher.get("result", teacher["include"]))
                 attach_target = float(teacher["include"])
                 traversal_candidates.append(
                     {
@@ -132,7 +133,9 @@ def write_ranking_files(episodes: Sequence[dict], *, ranking_dir: Path, teacher_
                         "kind": candidate["kind"],
                         "label": hard_label(traversal_target),
                         "rank_target": round(traversal_target, 6),
-                        "weight": rank_weight(traversal_target),
+                        "result_label": hard_label(result_target),
+                        "result_rank_target": round(result_target, 6),
+                        "weight": rank_weight(result_target),
                         "dst_summary": round_vector(dst_summary),
                         "edge": round_vector(stable_edge_vector(current_summary, dst_summary, 16)),
                         "confidence": candidate["confidence"],
@@ -197,11 +200,19 @@ def candidate_teacher(candidate: dict, teacher_key: str) -> dict[str, float]:
         "include": float(teacher["include"]),
         "expand": float(teacher["expand"]),
         "stop": float(teacher["stop"]),
+        "result": float(teacher.get("result", teacher["include"])),
     }
 
 
-def teacher_target(teacher: dict[str, float]) -> tuple[float, float, float, float, float]:
-    return teacher["follow"], teacher["read_full"], teacher["include"], teacher["expand"], teacher["stop"]
+def teacher_target(teacher: dict[str, float]) -> tuple[float, float, float, float, float, float]:
+    return (
+        teacher["follow"],
+        teacher["read_full"],
+        teacher["include"],
+        teacher["expand"],
+        teacher["stop"],
+        teacher.get("result", teacher["include"]),
+    )
 
 
 def hard_label(score: float) -> int:

@@ -140,6 +140,7 @@ class TraversalController:
                         include_score=scores.include_score,
                         expand_score=scores.expand_score,
                         stop_score=scores.stop_score,
+                        result_score=scores.result_score,
                         critical_score=critical_score,
                         read_full=read_full,
                         included=included,
@@ -175,7 +176,18 @@ class TraversalController:
             frontier = sorted(next_frontier, key=lambda item: item[0])
 
         visited = tuple(decisions[node_id] for node_id in sorted(decisions))
-        included = tuple(decision for decision in visited if decision.included)
+        included = tuple(
+            sorted(
+                (decision for decision in visited if decision.included),
+                key=lambda decision: (
+                    -decision.result_score,
+                    -decision.include_score,
+                    -decision.follow_score,
+                    decision.hop,
+                    decision.node_id,
+                ),
+            )
+        )
         rejected = tuple(decision for decision in visited if not decision.included)
         return TraversalResult(seed_id=seed_id, included=included, rejected=rejected, visited=visited)
 

@@ -5,15 +5,36 @@ import argparse
 import json
 import math
 import sys
+import time
 from collections import Counter
 from pathlib import Path
 from typing import Iterable
 
-import torch
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
-from torch import nn
+try:
+    import torch
+    from torch import nn
+    from vector_graph.torch_models import TorchModelConfig, config_from_checkpoint, create_model_pair, traversal_scalars
+except ImportError as exc:  # pragma: no cover - depends on the local environment.
+    torch = None  # type: ignore[assignment]
+    nn = None  # type: ignore[assignment]
+    TorchModelConfig = None  # type: ignore[assignment]
+    create_model_pair = None  # type: ignore[assignment]
+    TORCH_IMPORT_ERROR = exc
 
-from vector_graph.torch_models import TorchModelConfig, create_model_pair, traversal_scalars
+    def traversal_scalars(confidence: float, hop: int, scalar_dim: int = 2) -> tuple[float, ...]:
+        values = [max(0.0, min(1.0, float(confidence))), max(0.0, min(1.0, float(hop) / 3.0))]
+        if scalar_dim <= len(values):
+            return tuple(values[:scalar_dim])
+        return tuple(values + [0.0] * (scalar_dim - len(values)))
+else:
+    TORCH_IMPORT_ERROR = None
+
+
+TRAVERSAL_ACTIONS = ("follow", "read_full", "include", "expand", "stop", "result")
 
 
 def main() -> None:
@@ -21,15 +42,38 @@ def main() -> None:
     parser.add_argument("--benchmark-dir", default="data/benchmarks/synthetic")
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--device", default="auto")
+    parser.add_argument("--batch-size", type=int, default=4096)
+    parser.add_argument(
+        "--positive-threshold",
+        type=float,
+        default=0.65,
+        help="Continuous teacher score threshold used for per-action binary metrics.",
+    )
+    parser.add_argument(
+        "--max-target-pairwise-pairs",
+        type=int,
+        default=200_000,
+        help=(
+            "Maximum deterministic sampled pairs for continuous target pairwise metrics. "
+            "Use 0 for exact all-pairs evaluation."
+        ),
+    )
     parser.add_argument("--json-output", default=None)
+    parser.add_argument("--min-traversal-top1-accuracy", type=float, default=None)
+    parser.add_argument("--min-attach-top1-accuracy", type=float, default=None)
     parser.add_argument("--min-traversal-precision-at-1", type=float, default=None)
     parser.add_argument("--min-attach-precision-at-1", type=float, default=None)
     parser.add_argument("--min-traversal-average-precision", type=float, default=None)
     parser.add_argument("--min-attach-average-precision", type=float, default=None)
     parser.add_argument("--min-traversal-precision-at-recall-90", type=float, default=None)
     parser.add_argument("--min-attach-precision-at-recall-80", type=float, default=None)
+    parser.add_argument("--min-traversal-hard-negative-pairwise-accuracy", type=float, default=None)
+    parser.add_argument("--min-attach-hard-negative-pairwise-accuracy", type=float, default=None)
+    parser.add_argument("--min-traversal-ndcg-at-5", type=float, default=None)
+    parser.add_argument("--min-attach-ndcg-at-5", type=float, default=None)
     args = parser.parse_args()
 
+    require_torch()
     device = pick_device(args.device)
     traversal_model, attach_model, _ = load_models(Path(args.checkpoint), device=device)
     benchmark_dir = Path(args.benchmark_dir)
@@ -37,12 +81,27 @@ def main() -> None:
     traversal_cases = list(read_jsonl(benchmark_dir / "traversal_ranking.jsonl"))
     attach_cases = list(read_jsonl(benchmark_dir / "attach_ranking.jsonl"))
 
-    traversal_metrics = evaluate_traversal(traversal_model, traversal_cases, device=device)
-    attach_metrics = evaluate_attach(attach_model, attach_cases, device=device)
+    traversal_metrics = evaluate_traversal(
+        traversal_model,
+        traversal_cases,
+        device=device,
+        batch_size=args.batch_size,
+        positive_threshold=args.positive_threshold,
+        max_target_pairwise_pairs=args.max_target_pairwise_pairs,
+    )
+    attach_metrics = evaluate_attach(
+        attach_model,
+        attach_cases,
+        device=device,
+        batch_size=args.batch_size,
+    )
     report = {
         "checkpoint": args.checkpoint,
         "benchmark_dir": str(benchmark_dir),
         "device": str(device),
+        "batch_size": args.batch_size,
+        "positive_threshold": args.positive_threshold,
+        "max_target_pairwise_pairs": args.max_target_pairwise_pairs,
         "traversal": traversal_metrics,
         "attach": attach_metrics,
     }
@@ -62,8 +121,9 @@ def main() -> None:
 
 
 def load_models(checkpoint_path: Path, *, device: torch.device) -> tuple[nn.Module, nn.Module, TorchModelConfig]:
+    require_torch()
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    config = TorchModelConfig(**checkpoint["config"])
+    config = config_from_checkpoint(checkpoint)
     traversal_model, attach_model = create_model_pair(config)
     traversal_model = traversal_model.to(device)
     attach_model = attach_model.to(device)
@@ -74,15 +134,33 @@ def load_models(checkpoint_path: Path, *, device: torch.device) -> tuple[nn.Modu
     return traversal_model, attach_model, config
 
 
-def evaluate_traversal(model: nn.Module, cases: list[dict], *, device: torch.device) -> dict[str, float | int]:
+def require_torch() -> None:
+    if TORCH_IMPORT_ERROR is not None:
+        raise SystemExit(
+            "benchmark_scorer.py requires PyTorch for checkpoint evaluation. "
+            "Install the torch extra locally or run it in Colab."
+        ) from TORCH_IMPORT_ERROR
+
+
+def evaluate_traversal(
+    model: nn.Module,
+    cases: list[dict],
+    *,
+    device: torch.device,
+    batch_size: int = 4096,
+    positive_threshold: float = 0.65,
+    max_target_pairwise_pairs: int = 200_000,
+) -> dict[str, object]:
     rows = []
     spans = []
     labels = []
     kinds = []
     oracle_scores = []
+    action_targets: dict[str, list[float | None]] = {action: [] for action in TRAVERSAL_ACTIONS}
     for case in cases:
         start = len(rows)
         for candidate in case["candidates"]:
+            result_target = traversal_candidate_target(candidate, action_index=5)
             rows.append(
                 case["query"]
                 + case["current_summary"]
@@ -91,13 +169,21 @@ def evaluate_traversal(model: nn.Module, cases: list[dict], *, device: torch.dev
                 + case["path"]
                 + list(traversal_scalars(candidate["confidence"], candidate["hop"]))
             )
-            labels.append(candidate["label"])
-            kinds.append(candidate["kind"])
-            oracle_scores.append(candidate["oracle"][0])
+            labels.append(candidate_label(candidate, result_target, positive_threshold=positive_threshold))
+            kinds.append(candidate.get("kind", "unknown"))
+            oracle_scores.append(float(result_target if result_target is not None else labels[-1]))
+            for index, action in enumerate(TRAVERSAL_ACTIONS):
+                action_targets[action].append(traversal_candidate_target(candidate, action_index=index))
         spans.append((start, len(rows)))
 
-    predictions = score_tensor(model, rows, device=device)[:, 0].tolist()
-    return ranking_metrics(
+    synchronize_device(device)
+    start_time = time.perf_counter()
+    output_tensor = score_tensor(model, rows, device=device, batch_size=batch_size)
+    synchronize_device(device)
+    scoring_seconds = time.perf_counter() - start_time
+    result_index = 5 if output_tensor.shape[1] > 5 else 2
+    predictions = output_tensor[:, result_index].tolist()
+    metrics = ranking_metrics(
         cases=cases,
         spans=spans,
         predictions=predictions,
@@ -105,9 +191,23 @@ def evaluate_traversal(model: nn.Module, cases: list[dict], *, device: torch.dev
         kinds=kinds,
         oracle_scores=oracle_scores,
     )
+    metrics.update(latency_metrics(scoring_seconds, candidate_count=len(rows), case_count=len(cases)))
+    metrics["action_metrics"] = traversal_action_metrics(
+        output_tensor,
+        action_targets,
+        positive_threshold=positive_threshold,
+        max_target_pairwise_pairs=max_target_pairwise_pairs,
+    )
+    return metrics
 
 
-def evaluate_attach(model: nn.Module, cases: list[dict], *, device: torch.device) -> dict[str, float | int]:
+def evaluate_attach(
+    model: nn.Module,
+    cases: list[dict],
+    *,
+    device: torch.device,
+    batch_size: int = 4096,
+) -> dict[str, object]:
     rows = []
     spans = []
     labels = []
@@ -116,6 +216,7 @@ def evaluate_attach(model: nn.Module, cases: list[dict], *, device: torch.device
     for case in cases:
         start = len(rows)
         for candidate in case["candidates"]:
+            oracle_score = attach_candidate_target(candidate)
             rows.append(
                 case["new_summary"]
                 + candidate["candidate_summary"]
@@ -123,13 +224,18 @@ def evaluate_attach(model: nn.Module, cases: list[dict], *, device: torch.device
                 + candidate["candidate_full"]
                 + case["path"]
             )
-            labels.append(candidate["label"])
-            kinds.append(candidate["kind"])
-            oracle_scores.append(candidate["oracle"])
+            labels.append(int(candidate.get("label", 1 if oracle_score >= 0.65 else 0)))
+            kinds.append(candidate.get("kind", "unknown"))
+            oracle_scores.append(oracle_score)
         spans.append((start, len(rows)))
 
-    predictions = score_tensor(model, rows, device=device).reshape(-1).tolist()
-    return ranking_metrics(
+    synchronize_device(device)
+    start_time = time.perf_counter()
+    output_tensor = score_tensor(model, rows, device=device, batch_size=batch_size)
+    synchronize_device(device)
+    scoring_seconds = time.perf_counter() - start_time
+    predictions = output_tensor.reshape(-1).tolist()
+    metrics = ranking_metrics(
         cases=cases,
         spans=spans,
         predictions=predictions,
@@ -137,6 +243,8 @@ def evaluate_attach(model: nn.Module, cases: list[dict], *, device: torch.device
         kinds=kinds,
         oracle_scores=oracle_scores,
     )
+    metrics.update(latency_metrics(scoring_seconds, candidate_count=len(rows), case_count=len(cases)))
+    return metrics
 
 
 def ranking_metrics(
@@ -157,6 +265,8 @@ def ranking_metrics(
     oracle_mrr_sum = 0.0
     adversarial_correct = 0
     adversarial_total = 0
+    hard_negative_correct = 0
+    hard_negative_total = 0
     oracle_pair_correct = 0
     oracle_pair_total = 0
     total_positives = 0
@@ -213,6 +323,10 @@ def ranking_metrics(
                         adversarial_total += 1
                         if predictions[pos] > predictions[neg]:
                             adversarial_correct += 1
+                    if is_hard_negative_kind(kinds[neg]):
+                        hard_negative_total += 1
+                        if predictions[pos] > predictions[neg]:
+                            hard_negative_correct += 1
                     if oracle_scores[pos] > oracle_scores[neg]:
                         oracle_pair_total += 1
                         oracle_pair_total_by_negative_kind[kinds[neg]] += 1
@@ -223,6 +337,7 @@ def ranking_metrics(
     threshold_05 = threshold_metrics(predictions, labels, threshold=0.5)
     best = best_f1(predictions, labels)
     precision_curve = precision_recall_summary(predictions, labels)
+    calibration = calibration_metrics(predictions, labels)
     case_count = len(cases)
     kind_counts = Counter(kinds)
     return {
@@ -249,6 +364,7 @@ def ranking_metrics(
         "ndcg_at_3": ndcg_sums[3] / max(case_count, 1),
         "ndcg_at_5": ndcg_sums[5] / max(case_count, 1),
         "adversarial_pairwise_accuracy": adversarial_correct / max(adversarial_total, 1),
+        "hard_negative_pairwise_accuracy": hard_negative_correct / max(hard_negative_total, 1),
         "oracle_pairwise_accuracy": oracle_pair_correct / max(oracle_pair_total, 1),
         "threshold_0_5_precision": threshold_05["precision"],
         "threshold_0_5_recall": threshold_05["recall"],
@@ -257,6 +373,12 @@ def ranking_metrics(
         "best_f1_threshold": best["threshold"],
         "mean_positive_score": mean(positive_scores),
         "mean_negative_score": mean(negative_scores),
+        "score_min": min(predictions, default=0.0),
+        "score_max": max(predictions, default=0.0),
+        "score_std": standard_deviation(predictions),
+        "positive_rate": sum(labels) / max(len(labels), 1),
+        "brier_score": calibration["brier_score"],
+        "ece_10": calibration["ece_10"],
         "kind_counts": dict(sorted(kind_counts.items())),
         "top1_kind_counts": dict(sorted(top1_kind_counts.items())),
         "mean_score_by_kind": {
@@ -273,10 +395,155 @@ def ranking_metrics(
     }
 
 
-def score_tensor(model: torch.nn.Module, rows: list[list[float]], *, device: torch.device) -> torch.Tensor:
+def traversal_candidate_target(candidate: dict, *, action_index: int) -> float | None:
+    if action_index == 5:
+        if "result_rank_target" in candidate:
+            return float(candidate["result_rank_target"])
+        oracle = candidate.get("oracle")
+        if isinstance(oracle, list) and len(oracle) > 5:
+            return float(oracle[5])
+        if isinstance(oracle, list) and len(oracle) > 2:
+            return float(oracle[2])
+        if "result_label" in candidate:
+            return float(candidate["result_label"])
+        if "label" in candidate:
+            return float(candidate["label"])
+    oracle = candidate.get("oracle")
+    if isinstance(oracle, list) and action_index < len(oracle):
+        return float(oracle[action_index])
+    if action_index == 0:
+        if "rank_target" in candidate:
+            return float(candidate["rank_target"])
+        if "label" in candidate:
+            return float(candidate["label"])
+    return None
+
+
+def attach_candidate_target(candidate: dict) -> float:
+    if "rank_target" in candidate:
+        return float(candidate["rank_target"])
+    if "oracle" in candidate:
+        return float(candidate["oracle"])
+    return float(candidate.get("label", 0))
+
+
+def candidate_label(
+    candidate: dict,
+    target: float | None,
+    *,
+    positive_threshold: float,
+) -> int:
+    if "result_label" in candidate:
+        return int(candidate["result_label"])
+    if target is not None:
+        return 1 if target >= positive_threshold else 0
+    if "label" in candidate:
+        return int(candidate["label"])
+    return 0
+
+
+def traversal_action_metrics(
+    output_tensor: torch.Tensor,
+    action_targets: dict[str, list[float | None]],
+    *,
+    positive_threshold: float,
+    max_target_pairwise_pairs: int,
+) -> dict[str, dict[str, float | int]]:
+    action_metrics = {}
+    for action_index, action in enumerate(TRAVERSAL_ACTIONS):
+        if output_tensor.shape[1] <= action_index:
+            continue
+        targets = action_targets[action]
+        if not targets or any(target is None for target in targets):
+            continue
+        scores = output_tensor[:, action_index].tolist()
+        labels = [1 if float(target) >= positive_threshold else 0 for target in targets]
+        action_metrics[action] = binary_score_metrics(
+            scores,
+            labels,
+            targets=[float(target) for target in targets],
+            max_target_pairwise_pairs=max_target_pairwise_pairs,
+        )
+    return action_metrics
+
+
+def binary_score_metrics(
+    scores: list[float],
+    labels: list[int],
+    *,
+    targets: list[float] | None = None,
+    max_target_pairwise_pairs: int = 200_000,
+) -> dict[str, float | int]:
+    threshold_05 = threshold_metrics(scores, labels, threshold=0.5)
+    best = best_f1(scores, labels)
+    precision_curve = precision_recall_summary(scores, labels)
+    calibration = calibration_metrics(scores, labels)
+    positive_scores = [score for score, label in zip(scores, labels) if label == 1]
+    negative_scores = [score for score, label in zip(scores, labels) if label == 0]
+    result = {
+        "candidates": len(labels),
+        "positives": sum(labels),
+        "positive_rate": sum(labels) / max(len(labels), 1),
+        "average_precision": precision_curve["average_precision"],
+        "precision_at_recall_80": precision_curve["precision_at_recall_80"],
+        "precision_at_recall_90": precision_curve["precision_at_recall_90"],
+        "precision_at_recall_95": precision_curve["precision_at_recall_95"],
+        "threshold_0_5_precision": threshold_05["precision"],
+        "threshold_0_5_recall": threshold_05["recall"],
+        "threshold_0_5_f1": threshold_05["f1"],
+        "best_f1": best["f1"],
+        "best_f1_threshold": best["threshold"],
+        "mean_positive_score": mean(positive_scores),
+        "mean_negative_score": mean(negative_scores),
+        "score_min": min(scores, default=0.0),
+        "score_max": max(scores, default=0.0),
+        "score_std": standard_deviation(scores),
+        "brier_score": calibration["brier_score"],
+        "ece_10": calibration["ece_10"],
+    }
+    if targets is not None:
+        pairwise = target_pairwise_metrics(
+            scores,
+            targets,
+            max_pairs=max_target_pairwise_pairs,
+        )
+        result["target_pairwise_accuracy"] = pairwise["accuracy"]
+        result["target_pairwise_pairs"] = pairwise["pairs"]
+        result["target_pairwise_sampled"] = pairwise["sampled"]
+        result["mean_target"] = mean(targets)
+    return result
+
+
+def score_tensor(
+    model: torch.nn.Module,
+    rows: list[list[float]],
+    *,
+    device: torch.device,
+    batch_size: int = 4096,
+) -> torch.Tensor:
+    if batch_size <= 0:
+        raise ValueError("--batch-size must be positive")
+    if not rows:
+        return torch.empty((0,), dtype=torch.float32)
+    outputs = []
     with torch.inference_mode():
-        tensor = torch.tensor(rows, dtype=torch.float32, device=device)
-        return model(tensor).detach().cpu()
+        for start in range(0, len(rows), batch_size):
+            tensor = torch.tensor(rows[start : start + batch_size], dtype=torch.float32, device=device)
+            outputs.append(model(tensor).detach().cpu())
+    return torch.cat(outputs, dim=0)
+
+
+def synchronize_device(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+
+
+def latency_metrics(scoring_seconds: float, *, candidate_count: int, case_count: int) -> dict[str, float]:
+    return {
+        "scoring_ms": scoring_seconds * 1000.0,
+        "scoring_ms_per_case": scoring_seconds * 1000.0 / max(case_count, 1),
+        "candidates_per_second": candidate_count / max(scoring_seconds, 1e-12),
+    }
 
 
 def threshold_metrics(scores: list[float], labels: list[int], *, threshold: float) -> dict[str, float]:
@@ -287,6 +554,27 @@ def threshold_metrics(scores: list[float], labels: list[int], *, threshold: floa
     precision = true_positive / max(true_positive + false_positive, 1)
     recall = true_positive / max(true_positive + false_negative, 1)
     return {"precision": precision, "recall": recall, "f1": f1(precision, recall)}
+
+
+def calibration_metrics(scores: list[float], labels: list[int], *, bins: int = 10) -> dict[str, float]:
+    if not scores:
+        return {"brier_score": 0.0, "ece_10": 0.0}
+    clipped = [min(max(score, 0.0), 1.0) for score in scores]
+    brier = mean((score - label) ** 2 for score, label in zip(clipped, labels))
+    ece = 0.0
+    for bin_index in range(bins):
+        lower = bin_index / bins
+        upper = (bin_index + 1) / bins
+        if bin_index == bins - 1:
+            indexes = [index for index, score in enumerate(clipped) if lower <= score <= upper]
+        else:
+            indexes = [index for index, score in enumerate(clipped) if lower <= score < upper]
+        if not indexes:
+            continue
+        confidence = mean(clipped[index] for index in indexes)
+        accuracy = mean(labels[index] for index in indexes)
+        ece += (len(indexes) / len(clipped)) * abs(confidence - accuracy)
+    return {"brier_score": brier, "ece_10": ece}
 
 
 def best_f1(scores: list[float], labels: list[int]) -> dict[str, float]:
@@ -328,8 +616,31 @@ def average_precision_score(scores: list[float], labels: list[int]) -> float:
 
 
 def precision_recall_curve(scores: list[float], labels: list[int]) -> list[dict[str, float]]:
-    thresholds = sorted(set(scores), reverse=True)
-    return [threshold_metrics(scores, labels, threshold=threshold) | {"threshold": threshold} for threshold in thresholds]
+    ranked = sorted(zip(scores, labels), key=lambda item: -item[0])
+    positives = sum(labels)
+    true_positive = 0
+    false_positive = 0
+    curve = []
+    index = 0
+    while index < len(ranked):
+        threshold = ranked[index][0]
+        while index < len(ranked) and ranked[index][0] == threshold:
+            if ranked[index][1] == 1:
+                true_positive += 1
+            else:
+                false_positive += 1
+            index += 1
+        precision = true_positive / max(true_positive + false_positive, 1)
+        recall = true_positive / max(positives, 1)
+        curve.append(
+            {
+                "threshold": threshold,
+                "precision": precision,
+                "recall": recall,
+                "f1": f1(precision, recall),
+            }
+        )
+    return curve
 
 
 def max_precision_at_recall(curve: list[dict[str, float]], min_recall: float) -> float:
@@ -368,6 +679,121 @@ def mean(values: Iterable[float]) -> float:
     return sum(values) / len(values)
 
 
+def standard_deviation(values: Iterable[float]) -> float:
+    values = list(values)
+    if len(values) < 2:
+        return 0.0
+    average = mean(values)
+    return math.sqrt(mean((value - average) ** 2 for value in values))
+
+
+def target_pairwise_accuracy(
+    scores: list[float],
+    targets: list[float],
+    *,
+    min_delta: float = 0.05,
+    max_pairs: int = 0,
+) -> float:
+    return target_pairwise_metrics(
+        scores,
+        targets,
+        min_delta=min_delta,
+        max_pairs=max_pairs,
+    )["accuracy"]
+
+
+def target_pairwise_metrics(
+    scores: list[float],
+    targets: list[float],
+    *,
+    min_delta: float = 0.05,
+    max_pairs: int = 200_000,
+) -> dict[str, float | int]:
+    if len(scores) != len(targets):
+        raise ValueError("scores and targets must have the same length")
+    potential_pairs = len(scores) * (len(scores) - 1) // 2
+    if max_pairs <= 0 or potential_pairs <= max_pairs:
+        accuracy, pairs = exact_target_pairwise_accuracy(scores, targets, min_delta=min_delta)
+        return {"accuracy": accuracy, "pairs": pairs, "sampled": 0}
+    accuracy, pairs = sampled_target_pairwise_accuracy(
+        scores,
+        targets,
+        min_delta=min_delta,
+        max_pairs=max_pairs,
+    )
+    return {"accuracy": accuracy, "pairs": pairs, "sampled": 1}
+
+
+def exact_target_pairwise_accuracy(
+    scores: list[float],
+    targets: list[float],
+    *,
+    min_delta: float,
+) -> tuple[float, int]:
+    correct = 0
+    total = 0
+    for left in range(len(scores)):
+        for right in range(left + 1, len(scores)):
+            target_delta = targets[left] - targets[right]
+            if abs(target_delta) < min_delta:
+                continue
+            score_delta = scores[left] - scores[right]
+            total += 1
+            if target_delta * score_delta > 0:
+                correct += 1
+    return correct / max(total, 1), total
+
+
+def sampled_target_pairwise_accuracy(
+    scores: list[float],
+    targets: list[float],
+    *,
+    min_delta: float,
+    max_pairs: int,
+) -> tuple[float, int]:
+    if len(scores) < 2 or max_pairs <= 0:
+        return 0.0, 0
+    correct = 0
+    total = 0
+    attempts = 0
+    max_attempts = max_pairs * 20
+    seen: set[tuple[int, int]] = set()
+    state = 0x9E3779B97F4A7C15
+    mask = (1 << 64) - 1
+    while total < max_pairs and attempts < max_attempts:
+        attempts += 1
+        state = (state * 6364136223846793005 + 1442695040888963407) & mask
+        left = state % len(scores)
+        state = (state * 6364136223846793005 + 1442695040888963407) & mask
+        right = state % (len(scores) - 1)
+        if right >= left:
+            right += 1
+        if left > right:
+            left, right = right, left
+        pair = (int(left), int(right))
+        if pair in seen:
+            continue
+        seen.add(pair)
+        target_delta = targets[pair[0]] - targets[pair[1]]
+        if abs(target_delta) < min_delta:
+            continue
+        score_delta = scores[pair[0]] - scores[pair[1]]
+        total += 1
+        if target_delta * score_delta > 0:
+            correct += 1
+    return correct / max(total, 1), total
+
+
+def is_hard_negative_kind(kind: str) -> bool:
+    normalized = kind.lower()
+    return (
+        "hard" in normalized
+        or "adversarial" in normalized
+        or "wrong_topic" in normalized
+        or "negative" in normalized
+    )
+
+
 def ratio_by_key(numerators: Counter, denominators: Counter) -> dict[str, float]:
     return {
         key: numerators[key] / max(denominator, 1)
@@ -391,12 +817,22 @@ def read_jsonl(path: Path):
 
 def threshold_failures(report: dict, args: argparse.Namespace) -> list[str]:
     checks = [
+        ("traversal", "top1_accuracy", args.min_traversal_top1_accuracy),
+        ("attach", "top1_accuracy", args.min_attach_top1_accuracy),
         ("traversal", "precision_at_1", args.min_traversal_precision_at_1),
         ("attach", "precision_at_1", args.min_attach_precision_at_1),
         ("traversal", "average_precision", args.min_traversal_average_precision),
         ("attach", "average_precision", args.min_attach_average_precision),
         ("traversal", "precision_at_recall_90", args.min_traversal_precision_at_recall_90),
         ("attach", "precision_at_recall_80", args.min_attach_precision_at_recall_80),
+        (
+            "traversal",
+            "hard_negative_pairwise_accuracy",
+            args.min_traversal_hard_negative_pairwise_accuracy,
+        ),
+        ("attach", "hard_negative_pairwise_accuracy", args.min_attach_hard_negative_pairwise_accuracy),
+        ("traversal", "ndcg_at_5", args.min_traversal_ndcg_at_5),
+        ("attach", "ndcg_at_5", args.min_attach_ndcg_at_5),
     ]
     failures = []
     for section, metric, minimum in checks:
@@ -412,6 +848,7 @@ def print_report(report: dict) -> None:
     print(f"checkpoint: {report['checkpoint']}")
     print(f"benchmark:  {report['benchmark_dir']}")
     print(f"device:     {report['device']}")
+    print(f"batch_size: {report['batch_size']}")
     for section in ("traversal", "attach"):
         metrics = report[section]
         print()
@@ -439,6 +876,7 @@ def print_report(report: dict) -> None:
             "ndcg_at_3",
             "ndcg_at_5",
             "adversarial_pairwise_accuracy",
+            "hard_negative_pairwise_accuracy",
             "oracle_pairwise_accuracy",
             "threshold_0_5_precision",
             "threshold_0_5_recall",
@@ -447,6 +885,13 @@ def print_report(report: dict) -> None:
             "best_f1_threshold",
             "mean_positive_score",
             "mean_negative_score",
+            "score_std",
+            "positive_rate",
+            "brier_score",
+            "ece_10",
+            "scoring_ms",
+            "scoring_ms_per_case",
+            "candidates_per_second",
         ):
             value = metrics[key]
             if isinstance(value, float):
@@ -456,6 +901,16 @@ def print_report(report: dict) -> None:
         print("  pairwise_accuracy_by_negative_kind:")
         for kind, value in metrics["pairwise_accuracy_by_negative_kind"].items():
             print(f"    {kind}: {value:.4f}")
+        if section == "traversal" and metrics.get("action_metrics"):
+            print("  action_metrics:")
+            for action, action_metric in metrics["action_metrics"].items():
+                print(
+                    "    "
+                    f"{action}: ap={action_metric['average_precision']:.4f} "
+                    f"best_f1={action_metric['best_f1']:.4f} "
+                    f"target_pairwise={action_metric['target_pairwise_accuracy']:.4f} "
+                    f"brier={action_metric['brier_score']:.4f}"
+                )
 
 
 if __name__ == "__main__":

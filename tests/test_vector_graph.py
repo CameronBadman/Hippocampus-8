@@ -77,6 +77,33 @@ class FixedTraversalScorer:
         return 0.0
 
 
+class BatchAttachScorer(FixedTraversalScorer):
+    def __init__(self, scores: dict[str, TraversalScores]) -> None:
+        super().__init__(scores)
+        self.attach_batches = 0
+        self.attach_calls = 0
+
+    def score_attach(
+        self,
+        *,
+        new_node: NodeFrame,
+        candidate_node: NodeFrame,
+        path_vector: Sequence[float],
+    ) -> float:
+        self.attach_calls += 1
+        return 0.9
+
+    def score_attach_batch(
+        self,
+        *,
+        new_node: NodeFrame,
+        candidate_nodes: Sequence[NodeFrame],
+        path_vectors: Sequence[Sequence[float]],
+    ) -> tuple[float, ...]:
+        self.attach_batches += 1
+        return tuple(0.9 for _ in candidate_nodes)
+
+
 class VectorGraphTests(unittest.TestCase):
     def make_store(self) -> GraphStore:
         store = GraphStore(max_outgoing_edges=4)
@@ -151,6 +178,23 @@ class VectorGraphTests(unittest.TestCase):
 
         self.assertLessEqual(len(attached), 2)
         self.assertGreaterEqual(len(store.get_edges("new")), 1)
+
+    def test_insert_node_uses_batch_attach_scoring_when_available(self) -> None:
+        store = self.make_store()
+        scorer = BatchAttachScorer({})
+        inserted = node("new", "compact edge vector relationship frame")
+
+        attached = insert_node(
+            store=store,
+            scorer=scorer,
+            node=inserted,
+            seed_id="a",
+            config=InsertConfig(attach_limit=3, attach_threshold=0.5),
+        )
+
+        self.assertTrue(attached)
+        self.assertEqual(scorer.attach_batches, 1)
+        self.assertEqual(scorer.attach_calls, 0)
 
     def test_max_hops_is_respected(self) -> None:
         store = self.make_store()
@@ -233,6 +277,35 @@ class VectorGraphTests(unittest.TestCase):
         self.assertTrue(decision.critical)
         self.assertTrue(decision.included)
         self.assertEqual(result.rejected, ())
+
+    def test_included_results_are_sorted_by_result_score(self) -> None:
+        store = GraphStore(max_outgoing_edges=4)
+        for frame in [
+            node("root", "root"),
+            node("bridge", "high follow bridge"),
+            node("answer", "best returned answer"),
+            node("support", "supporting answer"),
+        ]:
+            store.add_node(frame)
+        edge(store, "root", "bridge", 0.99)
+        edge(store, "root", "answer", 0.90)
+        edge(store, "root", "support", 0.95)
+        scorer = FixedTraversalScorer(
+            {
+                "bridge": TraversalScores(0.95, 0.2, 0.7, 0.0, 0.2, result_score=0.2),
+                "answer": TraversalScores(0.7, 0.9, 0.8, 0.0, 0.2, result_score=0.95),
+                "support": TraversalScores(0.8, 0.7, 0.8, 0.0, 0.2, result_score=0.75),
+            }
+        )
+        controller = TraversalController(
+            store=store,
+            scorer=scorer,
+            config=TraversalConfig(max_hops=1, fanout=4, beam_width=4, include_threshold=0.0),
+        )
+
+        result = controller.traverse(query_vector=embed_text("best returned answer", 32), seed_id="root")
+
+        self.assertEqual([decision.node_id for decision in result.included], ["answer", "support", "bridge"])
 
     def test_expressway_node_can_expand_above_normal_threshold(self) -> None:
         store = GraphStore(max_outgoing_edges=2, max_expressway_edges=4)

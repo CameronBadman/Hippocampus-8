@@ -36,6 +36,12 @@ def main() -> None:
     parser.add_argument("--device", default="auto")
     parser.add_argument("--model-kind", choices=("mlp", "transformer"), default="mlp")
     parser.add_argument("--attach-head-kind", choices=("transformer", "hybrid"), default="transformer")
+    parser.add_argument(
+        "--checkpoint-selection",
+        choices=("combined_loss", "ranking_loss", "validation_loss", "final"),
+        default="combined_loss",
+        help="Metric used to choose the saved checkpoint. Ranking-aware modes require --ranking-data-dir.",
+    )
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -87,7 +93,8 @@ def main() -> None:
         ranking_min_delta=args.ranking_min_delta,
         listwise_loss_weight=coalesce(args.traversal_listwise_loss_weight, args.listwise_loss_weight),
         listwise_temperature=args.listwise_temperature,
-        ranking_score_index=0,
+        ranking_score_index=5 if config.traversal_output_dim > 5 else 0,
+        checkpoint_selection=args.checkpoint_selection,
     )
     attach_history, attach_best_state = train_regressor(
         name="attach",
@@ -108,6 +115,7 @@ def main() -> None:
         listwise_loss_weight=coalesce(args.attach_listwise_loss_weight, args.listwise_loss_weight),
         listwise_temperature=args.listwise_temperature,
         ranking_score_index=None,
+        checkpoint_selection=args.checkpoint_selection,
     )
 
     output = Path(args.output)
@@ -119,7 +127,7 @@ def main() -> None:
             "attach_model": attach_best_state,
             "traversal_history": traversal_history,
             "attach_history": attach_history,
-            "selection": "best_validation_loss",
+            "selection": args.checkpoint_selection,
         },
         output,
     )
@@ -175,7 +183,7 @@ def load_traversal_examples(data_dir: Path) -> tuple[torch.Tensor, torch.Tensor]
                 + example["path"]
                 + list(traversal_scalars(example["confidence"], example["hop"]))
             )
-            targets.append(example["target"])
+            targets.append(normalize_traversal_target(example["target"]))
     if not rows:
         raise ValueError(f"no traversal_*.jsonl files found in {data_dir}")
     return torch.tensor(rows, dtype=torch.float32), torch.tensor(targets, dtype=torch.float32)
@@ -217,7 +225,14 @@ def load_traversal_ranking_examples(data_dir: Path) -> tuple[torch.Tensor, torch
                     + case["path"]
                     + list(traversal_scalars(candidate["confidence"], candidate["hop"]))
                 )
-                group_labels.append(float(candidate.get("rank_target", candidate["label"])))
+                group_labels.append(
+                    float(
+                        candidate.get(
+                            "result_rank_target",
+                            candidate.get("rank_target", candidate["label"]),
+                        )
+                    )
+                )
                 group_weights.append(float(candidate.get("weight", 1.0)))
             groups.append(group)
             labels.append(group_labels)
@@ -287,6 +302,15 @@ def attach_candidate_weight(
     return 1.0
 
 
+def normalize_traversal_target(target: list[float]) -> list[float]:
+    values = [float(value) for value in target]
+    if len(values) == 5:
+        values.append(values[2])
+    if len(values) != 6:
+        raise ValueError(f"traversal target must have 5 or 6 values, got {len(values)}")
+    return values
+
+
 def read_jsonl(path: Path):
     with path.open("r", encoding="utf-8") as handle:
         for line in handle:
@@ -315,6 +339,7 @@ def train_regressor(
     listwise_loss_weight: float = 0.0,
     listwise_temperature: float = 0.15,
     ranking_score_index: int | None = None,
+    checkpoint_selection: str = "combined_loss",
 ) -> tuple[list[dict[str, float]], dict[str, torch.Tensor]]:
     dataset = TensorDataset(x, y)
     validation_size = max(1, int(len(dataset) * 0.15))
@@ -327,18 +352,27 @@ def train_regressor(
     train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True, generator=torch.Generator().manual_seed(seed))
     validation_loader = DataLoader(validation_data, batch_size=batch_size, shuffle=False)
     ranking_loader = None
+    ranking_validation_loader = None
     if ranking is not None:
         ranking_dataset = TensorDataset(*ranking)
-        ranking_loader = DataLoader(
+        ranking_validation_size = max(1, int(len(ranking_dataset) * 0.15))
+        ranking_train_size = len(ranking_dataset) - ranking_validation_size
+        ranking_train_data, ranking_validation_data = random_split(
             ranking_dataset,
+            [ranking_train_size, ranking_validation_size],
+            generator=torch.Generator().manual_seed(seed + 17),
+        )
+        ranking_loader = DataLoader(
+            ranking_train_data,
             batch_size=ranking_batch_size,
             shuffle=True,
             generator=torch.Generator().manual_seed(seed + 101),
         )
+        ranking_validation_loader = DataLoader(ranking_validation_data, batch_size=ranking_batch_size, shuffle=False)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     loss_fn = nn.MSELoss()
     history = []
-    best_validation_loss = float("inf")
+    best_selection_loss = float("inf")
     best_state = clone_state_dict(model)
 
     for epoch in range(1, epochs + 1):
@@ -370,9 +404,30 @@ def train_regressor(
         model.eval()
         with torch.inference_mode():
             validation_loss = run_epoch(model, validation_loader, loss_fn, optimizer=None, device=device)
+            validation_ranking_loss = 0.0
+            if ranking_validation_loader is not None:
+                validation_ranking_loss = run_ranking_epoch(
+                    model,
+                    ranking_validation_loader,
+                    optimizer=None,
+                    device=device,
+                    loss_weight=ranking_loss_weight,
+                    margin=ranking_margin,
+                    min_delta=ranking_min_delta,
+                    listwise_loss_weight=listwise_loss_weight,
+                    listwise_temperature=listwise_temperature,
+                    score_index=ranking_score_index,
+                )
         validation_score_mean, validation_score_std = prediction_stats(model, validation_loader, device=device)
-        if validation_loss < best_validation_loss:
-            best_validation_loss = validation_loss
+        selection_loss = checkpoint_selection_loss(
+            checkpoint_selection,
+            validation_loss=validation_loss,
+            validation_ranking_loss=validation_ranking_loss,
+            has_ranking=ranking_validation_loader is not None,
+            epoch=epoch,
+        )
+        if selection_loss < best_selection_loss:
+            best_selection_loss = selection_loss
             best_state = clone_state_dict(model)
         history.append(
             {
@@ -380,17 +435,39 @@ def train_regressor(
                 "train_loss": train_loss,
                 "ranking_loss": ranking_loss,
                 "validation_loss": validation_loss,
+                "validation_ranking_loss": validation_ranking_loss,
                 "validation_score_mean": validation_score_mean,
                 "validation_score_std": validation_score_std,
-                "best_validation_loss": best_validation_loss,
+                "selection_loss": selection_loss,
+                "best_selection_loss": best_selection_loss,
             }
         )
         print(
             f"{name} epoch {epoch:02d}: train={train_loss:.6f} rank={ranking_loss:.6f} "
-            f"val={validation_loss:.6f} score_mean={validation_score_mean:.4f} score_std={validation_score_std:.4f}"
+            f"val={validation_loss:.6f} val_rank={validation_ranking_loss:.6f} "
+            f"select={selection_loss:.6f} score_mean={validation_score_mean:.4f} score_std={validation_score_std:.4f}"
         )
 
     return history, best_state
+
+
+def checkpoint_selection_loss(
+    selection: str,
+    *,
+    validation_loss: float,
+    validation_ranking_loss: float,
+    has_ranking: bool,
+    epoch: int,
+) -> float:
+    if selection == "validation_loss" or not has_ranking:
+        return validation_loss
+    if selection == "ranking_loss":
+        return validation_ranking_loss
+    if selection == "combined_loss":
+        return validation_loss + validation_ranking_loss
+    if selection == "final":
+        return -float(epoch)
+    raise ValueError(f"unknown checkpoint selection {selection!r}")
 
 
 def run_epoch(
@@ -433,7 +510,7 @@ def run_ranking_epoch(
     model: nn.Module,
     loader: DataLoader,
     *,
-    optimizer: torch.optim.Optimizer,
+    optimizer: torch.optim.Optimizer | None,
     device: torch.device,
     loss_weight: float,
     margin: float,
@@ -457,9 +534,10 @@ def run_ranking_epoch(
         pairwise_loss = pairwise_margin_loss(scores, batch_labels, weights=batch_weights, margin=margin, min_delta=min_delta)
         listwise_loss = listwise_softmax_loss(scores, batch_labels, temperature=listwise_temperature)
         loss = pairwise_loss * loss_weight + listwise_loss * listwise_loss_weight
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        optimizer.step()
+        if optimizer is not None:
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
         total_loss += float(loss.detach().cpu()) * len(batch_x)
         total_examples += len(batch_x)
     return total_loss / max(total_examples, 1)

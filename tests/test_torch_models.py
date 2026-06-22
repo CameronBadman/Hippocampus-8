@@ -226,9 +226,15 @@ class TorchModelTests(unittest.TestCase):
             candidate_node=candidate_node,
             path_vector=embed_text("attach path", 32),
         )
+        batch_score = scorer.score_attach_batch(
+            new_node=new_node,
+            candidate_nodes=[candidate_node],
+            path_vectors=[embed_text("attach path", 32)],
+        )
 
         self.assertGreaterEqual(score, 0.0)
         self.assertLessEqual(score, 1.0)
+        self.assertEqual(batch_score, (score,))
 
     def test_listwise_loss_prefers_positive_rank_mass(self) -> None:
         try:
@@ -311,6 +317,61 @@ class TorchModelTests(unittest.TestCase):
             [1, 4, 7],
         )
 
+    def test_qwen_prompt_includes_relationship_metadata(self) -> None:
+        from scripts.label_teacher_episodes_qwen import build_prompt
+
+        prompt = build_prompt(
+            {
+                "id": "episode-1",
+                "query": "find training label issue",
+                "expected_topic": "domain:training",
+                "query_intent": {"target_topic": "domain:training"},
+                "path": [
+                    {
+                        "node_id": "n1",
+                        "summary": "training path",
+                        "topic": "domain:training",
+                        "plain_topic": "training",
+                        "terms": ["label"],
+                    }
+                ],
+                "current_node": {
+                    "node_id": "n1",
+                    "summary": "training path",
+                    "full": "full training path",
+                    "topic": "domain:training",
+                    "plain_topic": "training",
+                    "terms": ["label"],
+                },
+                "candidates": [
+                    {
+                        "id": "candidate-1",
+                        "parent_id": "n1",
+                        "dst_id": "n2",
+                        "kind": "ambiguous_wrong_topic",
+                        "source_topic": "domain:training",
+                        "destination_topic": "domain:security",
+                        "destination_plain_topic": "security",
+                        "destination_terms": ["policy", "audit"],
+                        "edge_summary": "training -> security",
+                        "confidence": 0.4,
+                        "hop": 0,
+                        "relation": {
+                            "same_as_query_topic": False,
+                            "decision_hint": "lexically_ambiguous_wrong_topic",
+                        },
+                        "node_summary": "security label wording",
+                        "node_full": "security label wording full",
+                    }
+                ],
+            }
+        )
+
+        self.assertIn('"expected_topic":"domain:training"', prompt)
+        self.assertIn('"destination_topic":"domain:security"', prompt)
+        self.assertIn('"decision_hint":"lexically_ambiguous_wrong_topic"', prompt)
+        self.assertIn("hard negative", prompt)
+
     def test_qwen_labeler_marks_quota_errors_non_retryable(self) -> None:
         from scripts.label_teacher_episodes_qwen import is_non_retryable_http_error
 
@@ -339,6 +400,103 @@ class TorchModelTests(unittest.TestCase):
             classify_shard_status(returncode=1, line_count=8, expected_per_shard=8),
             "error",
         )
+
+    def test_benchmark_metrics_track_hard_negatives_and_calibration(self) -> None:
+        from scripts.benchmark_scorer import ranking_metrics
+
+        metrics = ranking_metrics(
+            cases=[{"id": "case-1"}],
+            spans=[(0, 3)],
+            predictions=[0.9, 0.1, 0.2],
+            labels=[1, 0, 0],
+            kinds=["positive", "easy_negative", "lexical_hard_negative_candidate"],
+            oracle_scores=[0.95, 0.05, 0.1],
+        )
+
+        self.assertEqual(metrics["top1_accuracy"], 1.0)
+        self.assertEqual(metrics["hard_negative_pairwise_accuracy"], 1.0)
+        self.assertLess(metrics["brier_score"], 0.1)
+        self.assertIn("lexical_hard_negative_candidate", metrics["pairwise_accuracy_by_negative_kind"])
+
+    def test_benchmark_target_pairwise_sampling_is_bounded_and_deterministic(self) -> None:
+        from scripts.benchmark_scorer import target_pairwise_metrics
+
+        scores = [index / 1000 for index in range(1000)]
+        targets = [index / 1000 for index in range(1000)]
+
+        first = target_pairwise_metrics(scores, targets, max_pairs=100)
+        second = target_pairwise_metrics(scores, targets, max_pairs=100)
+
+        self.assertEqual(first, second)
+        self.assertEqual(first["sampled"], 1)
+        self.assertLessEqual(first["pairs"], 100)
+        self.assertEqual(first["accuracy"], 1.0)
+
+    def test_benchmark_traversal_action_metrics_use_teacher_oracle_vector(self) -> None:
+        try:
+            import torch
+            from torch import nn
+            from scripts.benchmark_scorer import evaluate_traversal
+        except ImportError as exc:
+            self.skipTest(str(exc))
+
+        class FixedTraversalModel(nn.Module):
+            def forward(self, rows):  # type: ignore[no-untyped-def]
+                return torch.tensor(
+                    [
+                        [0.9, 0.1, 0.8, 0.7, 0.1],
+                        [0.1, 0.9, 0.2, 0.2, 0.8],
+                    ],
+                    dtype=torch.float32,
+                )
+
+        zero32 = [0.0] * 32
+        zero16 = [0.0] * 16
+        cases = [
+            {
+                "id": "case-1",
+                "query": zero32,
+                "current_summary": zero32,
+                "path": zero32,
+                "candidates": [
+                    {
+                        "id": "good",
+                        "kind": "positive",
+                        "label": 1,
+                        "rank_target": 0.9,
+                        "oracle": [0.9, 0.1, 0.8, 0.7, 0.1],
+                        "dst_summary": zero32,
+                        "edge": zero16,
+                        "confidence": 0.9,
+                        "hop": 0,
+                    },
+                    {
+                        "id": "bad",
+                        "kind": "hard_negative",
+                        "label": 0,
+                        "rank_target": 0.1,
+                        "oracle": [0.1, 0.9, 0.2, 0.2, 0.8],
+                        "dst_summary": zero32,
+                        "edge": zero16,
+                        "confidence": 0.4,
+                        "hop": 1,
+                    },
+                ],
+            }
+        ]
+
+        metrics = evaluate_traversal(
+            FixedTraversalModel(),
+            cases,
+            device=torch.device("cpu"),
+            batch_size=2,
+            positive_threshold=0.65,
+        )
+
+        self.assertEqual(metrics["precision_at_1"], 1.0)
+        self.assertEqual(metrics["action_metrics"]["follow"]["average_precision"], 1.0)
+        self.assertEqual(metrics["action_metrics"]["include"]["average_precision"], 1.0)
+        self.assertEqual(metrics["action_metrics"]["stop"]["average_precision"], 1.0)
 
 
 def read_jsonl(path: Path):

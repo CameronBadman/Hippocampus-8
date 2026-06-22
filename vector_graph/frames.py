@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 from typing import Any
 
 from .vectors import Vector, as_vector
@@ -53,6 +54,11 @@ class TraversalScores:
     include_score: float
     expand_score: float
     stop_score: float
+    result_score: float = math.nan
+
+    def __post_init__(self) -> None:
+        if math.isnan(self.result_score):
+            object.__setattr__(self, "result_score", self.include_score)
 
 
 @dataclass(frozen=True)
@@ -65,6 +71,7 @@ class TraversalDecision:
     include_score: float
     expand_score: float
     stop_score: float
+    result_score: float
     critical_score: float
     read_full: bool
     included: bool

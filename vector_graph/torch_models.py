@@ -33,6 +33,7 @@ class SmallTraversalNet(nn.Module):
         path_dim: int,
         scalar_dim: int = 2,
         hidden_dim: int = 128,
+        output_dim: int = 6,
     ) -> None:
         super().__init__()
         self.query_dim = query_dim
@@ -48,7 +49,7 @@ class SmallTraversalNet(nn.Module):
             nn.GELU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.GELU(),
-            nn.Linear(hidden_dim, 5),
+            nn.Linear(hidden_dim, output_dim),
         )
 
     def forward(self, inputs: Tensor) -> Tensor:
@@ -140,6 +141,7 @@ class SmallTraversalTransformerNet(nn.Module):
         hidden_dim: int = 128,
         layers: int = 2,
         heads: int = 4,
+        output_dim: int = 6,
     ) -> None:
         super().__init__()
         self.query_dim = query_dim
@@ -163,7 +165,7 @@ class SmallTraversalTransformerNet(nn.Module):
             batch_first=True,
         )
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=layers)
-        self.output = nn.Sequential(nn.LayerNorm(hidden_dim), nn.Linear(hidden_dim, 5), nn.Sigmoid())
+        self.output = nn.Sequential(nn.LayerNorm(hidden_dim), nn.Linear(hidden_dim, output_dim), nn.Sigmoid())
 
     def forward(self, inputs: Tensor) -> Tensor:
         query, current, edge, dst, path, scalars = split_traversal_inputs(
@@ -323,6 +325,7 @@ class TorchModelConfig:
     transformer_layers: int = 2
     transformer_heads: int = 4
     attach_head_kind: str = "transformer"
+    traversal_output_dim: int = 6
 
 
 class TorchTraversalScorer(TraversalScorer):
@@ -349,7 +352,7 @@ class TorchTraversalScorer(TraversalScorer):
     @classmethod
     def from_checkpoint(cls, checkpoint_path: str | Path, *, device: str = "cpu") -> "TorchTraversalScorer":
         checkpoint = torch.load(checkpoint_path, map_location=device)
-        config = TorchModelConfig(**checkpoint["config"])
+        config = config_from_checkpoint(checkpoint)
         traversal_model, attach_model = create_model_pair(config)
         traversal_model.load_state_dict(checkpoint["traversal_model"])
         attach_model.load_state_dict(checkpoint["attach_model"])
@@ -417,24 +420,41 @@ class TorchTraversalScorer(TraversalScorer):
         candidate_node: NodeFrame,
         path_vector: Sequence[float],
     ) -> float:
-        new_full = new_node.full_vector if new_node.full_vector is not None else new_node.summary_vector
-        candidate_full = candidate_node.full_vector if candidate_node.full_vector is not None else candidate_node.summary_vector
-        inputs = self._tensor(
-            [
-                resize_vector(new_node.summary_vector, self.config.summary_dim),
-                resize_vector(candidate_node.summary_vector, self.config.summary_dim),
-                resize_vector(new_full, self.config.full_dim),
-                resize_vector(candidate_full, self.config.full_dim),
-                resize_vector(path_vector, self.config.path_dim),
-            ]
-        )
-        with torch.inference_mode():
-            score = self.attach_model(inputs).detach().cpu().item()
-        return float(score)
+        return self.score_attach_batch(
+            new_node=new_node,
+            candidate_nodes=[candidate_node],
+            path_vectors=[path_vector],
+        )[0]
 
-    def _tensor(self, vectors: Sequence[Sequence[float]]) -> Tensor:
-        values = torch.tensor([value for vector in vectors for value in vector], dtype=torch.float32, device=self.device)
-        return values.unsqueeze(0)
+    def score_attach_batch(
+        self,
+        *,
+        new_node: NodeFrame,
+        candidate_nodes: Sequence[NodeFrame],
+        path_vectors: Sequence[Sequence[float]],
+    ) -> tuple[float, ...]:
+        if len(candidate_nodes) != len(path_vectors):
+            raise ValueError("candidate_nodes and path_vectors must have the same length")
+        if not candidate_nodes:
+            return ()
+
+        new_full = new_node.full_vector if new_node.full_vector is not None else new_node.summary_vector
+        rows = []
+        for candidate_node, path_vector in zip(candidate_nodes, path_vectors):
+            candidate_full = candidate_node.full_vector if candidate_node.full_vector is not None else candidate_node.summary_vector
+            rows.append(
+                [
+                    resize_vector(new_node.summary_vector, self.config.summary_dim),
+                    resize_vector(candidate_node.summary_vector, self.config.summary_dim),
+                    resize_vector(new_full, self.config.full_dim),
+                    resize_vector(candidate_full, self.config.full_dim),
+                    resize_vector(path_vector, self.config.path_dim),
+                ]
+            )
+        inputs = self._batch_tensor(rows)
+        with torch.inference_mode():
+            scores = self.attach_model(inputs).detach().cpu().reshape(-1).tolist()
+        return tuple(float(score) for score in scores)
 
     def _batch_tensor(self, rows: Sequence[Sequence[Sequence[float]]]) -> Tensor:
         values = [[value for vector in row for value in vector] for row in rows]
@@ -442,13 +462,30 @@ class TorchTraversalScorer(TraversalScorer):
 
 
 def _scores_from_values(values: Sequence[float]) -> TraversalScores:
+    result_score = float(values[5]) if len(values) > 5 else float(values[2])
     return TraversalScores(
         follow_score=float(values[0]),
         read_full_score=float(values[1]),
         include_score=float(values[2]),
         expand_score=float(values[3]),
         stop_score=float(values[4]),
+        result_score=result_score,
     )
+
+
+def config_from_checkpoint(checkpoint: dict) -> TorchModelConfig:
+    config_values = dict(checkpoint["config"])
+    if "traversal_output_dim" not in config_values:
+        config_values["traversal_output_dim"] = infer_traversal_output_dim(checkpoint["traversal_model"])
+    return TorchModelConfig(**config_values)
+
+
+def infer_traversal_output_dim(state_dict: dict[str, Tensor]) -> int:
+    for key in ("layers.4.weight", "output.1.weight"):
+        value = state_dict.get(key)
+        if value is not None:
+            return int(value.shape[0])
+    return 5
 
 
 def create_model_pair(config: TorchModelConfig) -> tuple[nn.Module, nn.Module]:
@@ -461,6 +498,7 @@ def create_model_pair(config: TorchModelConfig) -> tuple[nn.Module, nn.Module]:
                 path_dim=config.path_dim,
                 scalar_dim=config.scalar_dim,
                 hidden_dim=config.hidden_dim,
+                output_dim=config.traversal_output_dim,
             ),
             SmallAttachNet(
                 summary_dim=config.summary_dim,
@@ -480,6 +518,7 @@ def create_model_pair(config: TorchModelConfig) -> tuple[nn.Module, nn.Module]:
                 hidden_dim=config.hidden_dim,
                 layers=config.transformer_layers,
                 heads=config.transformer_heads,
+                output_dim=config.traversal_output_dim,
             ),
             SmallAttachTransformerNet(
                 summary_dim=config.summary_dim,

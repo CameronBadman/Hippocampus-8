@@ -73,6 +73,7 @@ class HeuristicTraversalScorer:
 
         expand_score = clamp01(follow_score * 0.80 + current_to_dst * 0.20 - hop * 0.05)
         stop_score = clamp01(1.0 - expand_score)
+        result_score = clamp01(include_score * 0.80 + read_full_score * 0.15 + follow_score * 0.05)
 
         return TraversalScores(
             follow_score=follow_score,
@@ -80,6 +81,7 @@ class HeuristicTraversalScorer:
             include_score=include_score,
             expand_score=expand_score,
             stop_score=stop_score,
+            result_score=result_score,
         )
 
     def score_attach(
@@ -98,7 +100,24 @@ class HeuristicTraversalScorer:
         summary_score = cosine01(new_node.summary_vector, candidate_node.summary_vector)
         return clamp01(summary_score * 0.60 + full_score * 0.30 + path_score * 0.10)
 
+    def score_attach_batch(
+        self,
+        *,
+        new_node: NodeFrame,
+        candidate_nodes: Sequence[NodeFrame],
+        path_vectors: Sequence[Sequence[float]],
+    ) -> tuple[float, ...]:
+        if len(candidate_nodes) != len(path_vectors):
+            raise ValueError("candidate_nodes and path_vectors must have the same length")
+        return tuple(
+            self.score_attach(
+                new_node=new_node,
+                candidate_node=candidate,
+                path_vector=path_vector,
+            )
+            for candidate, path_vector in zip(candidate_nodes, path_vectors)
+        )
+
 
 def path_vector_for(nodes: Sequence[NodeFrame], dimension: int) -> tuple[float, ...]:
     return blend_vectors([node.summary_vector for node in nodes], dimension)
-
