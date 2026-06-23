@@ -140,6 +140,8 @@ def build_domain(
                 full_payload=full,
                 metadata={
                     "topic": topic_name,
+                    "plain_topic": topic,
+                    "terms": node_terms,
                     "traversal_vector": resize_vector(embed_text(summary, 32), 16),
                 },
             )
@@ -184,12 +186,43 @@ def build_episode(
             if len(seed_ids) >= seed_limit:
                 break
     candidate_edges: list[tuple[str, EdgeFrame]] = []
+    candidate_reasons: dict[tuple[str, str], str] = {}
+
+    def add_candidate(parent_id: str, edge: EdgeFrame, reason: str) -> None:
+        key = (parent_id, edge.dst_id)
+        if key in candidate_reasons:
+            return
+        candidate_edges.append((parent_id, edge))
+        candidate_reasons[key] = reason
+
     for seed_id in seed_ids:
         for edge in store.get_edges(seed_id):
-            candidate_edges.append((seed_id, edge))
-    candidate_edges = sorted(candidate_edges, key=lambda item: (-item[1].confidence, item[0], item[1].dst_id))[:candidate_limit]
+            add_candidate(seed_id, edge, "outgoing_seed_edge")
     seed_nodes = [store.get_node(seed_id) for seed_id in seed_ids]
     path_vector = path_vector_for(seed_nodes[:1], 32) if seed_nodes else resize_vector(query_vector, 32)
+    current_seed_id = seed_ids[0] if seed_ids else None
+    if current_seed_id is not None:
+        add_query_target_candidates(
+            store=store,
+            query_vector=query_vector,
+            parent_id=current_seed_id,
+            expected_topic=expected_topic,
+            nodes_by_topic=nodes_by_topic,
+            add_candidate=add_candidate,
+        )
+        add_lexical_hard_negatives(
+            store=store,
+            query_vector=query_vector,
+            parent_id=current_seed_id,
+            expected_topic=expected_topic,
+            nodes_by_topic=nodes_by_topic,
+            add_candidate=add_candidate,
+        )
+    candidate_edges = select_balanced_candidate_edges(
+        candidate_edges,
+        candidate_reasons=candidate_reasons,
+        candidate_limit=candidate_limit,
+    )
 
     candidates = []
     for parent_id, edge in candidate_edges:
@@ -203,6 +236,14 @@ def build_episode(
             path_vector=path_vector,
             expected_topic=expected_topic,
         )
+        relation = describe_candidate_relation(
+            current=current,
+            dst=dst,
+            edge=edge,
+            expected_topic=expected_topic,
+            teacher=teacher,
+            retrieval_reason=candidate_reasons.get((parent_id, edge.dst_id), "unknown"),
+        )
         candidates.append(
             {
                 "id": f"{episode_id}:{len(candidates):03d}",
@@ -212,6 +253,12 @@ def build_episode(
                 "edge_summary": edge_summary(current, dst),
                 "confidence": round(edge.confidence, 6),
                 "hop": 0,
+                "source_topic": current.metadata["topic"],
+                "destination_topic": dst.metadata["topic"],
+                "destination_plain_topic": dst.metadata.get("plain_topic", ""),
+                "destination_terms": list(dst.metadata.get("terms", ())),
+                "relation": relation,
+                "retrieval_reason": candidate_reasons.get((parent_id, edge.dst_id), "unknown"),
                 "node_summary": dst.summary_payload,
                 "node_full": dst.full_payload,
                 "node_topic": dst.metadata["topic"],
@@ -226,12 +273,15 @@ def build_episode(
         "domain": domain_name,
         "query": query,
         "expected_topic": expected_topic,
+        "query_intent": describe_query_intent(query=query, expected_topic=expected_topic),
         "seed_ids": seed_ids,
         "path": [
             {
                 "node_id": node.node_id,
                 "summary": node.summary_payload,
                 "topic": node.metadata["topic"],
+                "plain_topic": node.metadata.get("plain_topic", ""),
+                "terms": list(node.metadata.get("terms", ())),
             }
             for node in seed_nodes[:2]
         ],
@@ -240,6 +290,8 @@ def build_episode(
             "summary": store.get_node(seed_ids[0]).summary_payload if seed_ids else "",
             "full": store.get_node(seed_ids[0]).full_payload if seed_ids else "",
             "topic": store.get_node(seed_ids[0]).metadata["topic"] if seed_ids else "",
+            "plain_topic": store.get_node(seed_ids[0]).metadata.get("plain_topic", "") if seed_ids else "",
+            "terms": list(store.get_node(seed_ids[0]).metadata.get("terms", ())) if seed_ids else [],
         },
         "candidates": candidates,
         "teacher_prompt": {
@@ -249,6 +301,152 @@ def build_episode(
                 "the query and keep the path on task; penalize lexical overlap with wrong intent."
             )
         },
+    }
+
+
+def add_query_target_candidates(
+    *,
+    store: GraphStore,
+    query_vector,
+    parent_id: str,
+    expected_topic: str,
+    nodes_by_topic: dict[str, list[GeneratedNode]],
+    add_candidate,
+) -> None:
+    parent = store.get_node(parent_id)
+    for generated in sorted(
+        nodes_by_topic.get(expected_topic, []),
+        key=lambda node: (-cosine01(query_vector, node.frame.summary_vector), node.frame.node_id),
+    )[:4]:
+        if generated.frame.node_id == parent_id:
+            continue
+        add_candidate(
+            parent_id,
+            EdgeFrame(
+                src_id=parent_id,
+                dst_id=generated.frame.node_id,
+                edge_vector=stable_edge_vector(parent.summary_vector, generated.frame.summary_vector, 16),
+                confidence=0.82,
+            ),
+            "nearest_target_topic_candidate",
+        )
+
+
+def select_balanced_candidate_edges(
+    candidate_edges: Sequence[tuple[str, EdgeFrame]],
+    *,
+    candidate_reasons: dict[tuple[str, str], str],
+    candidate_limit: int,
+) -> list[tuple[str, EdgeFrame]]:
+    sorted_edges = sorted(candidate_edges, key=lambda item: (-item[1].confidence, item[0], item[1].dst_id))
+    quotas = {
+        "nearest_target_topic_candidate": max(2, candidate_limit // 4),
+        "lexical_hard_negative_candidate": max(3, candidate_limit // 3),
+    }
+    selected: list[tuple[str, EdgeFrame]] = []
+    selected_keys: set[tuple[str, str]] = set()
+
+    def add(edge_row: tuple[str, EdgeFrame]) -> None:
+        key = (edge_row[0], edge_row[1].dst_id)
+        if key in selected_keys or len(selected) >= candidate_limit:
+            return
+        selected.append(edge_row)
+        selected_keys.add(key)
+
+    for reason, quota in quotas.items():
+        count = 0
+        for edge_row in sorted_edges:
+            key = (edge_row[0], edge_row[1].dst_id)
+            if candidate_reasons.get(key) != reason:
+                continue
+            add(edge_row)
+            count += 1
+            if count >= quota:
+                break
+
+    for edge_row in sorted_edges:
+        add(edge_row)
+        if len(selected) >= candidate_limit:
+            break
+    return selected
+
+
+def add_lexical_hard_negatives(
+    *,
+    store: GraphStore,
+    query_vector,
+    parent_id: str,
+    expected_topic: str,
+    nodes_by_topic: dict[str, list[GeneratedNode]],
+    add_candidate,
+) -> None:
+    parent = store.get_node(parent_id)
+    wrong_topic_nodes = [
+        generated
+        for topic, members in nodes_by_topic.items()
+        if topic != expected_topic
+        for generated in members
+    ]
+    for generated in sorted(
+        wrong_topic_nodes,
+        key=lambda node: (-cosine01(query_vector, node.frame.summary_vector), node.frame.node_id),
+    )[:6]:
+        if generated.frame.node_id == parent_id:
+            continue
+        add_candidate(
+            parent_id,
+            EdgeFrame(
+                src_id=parent_id,
+                dst_id=generated.frame.node_id,
+                edge_vector=stable_edge_vector(parent.summary_vector, generated.frame.summary_vector, 16),
+                confidence=0.58,
+            ),
+            "lexical_hard_negative_candidate",
+        )
+
+
+def describe_query_intent(*, query: str, expected_topic: str) -> dict[str, object]:
+    plain_topic = expected_topic.split(":", 1)[1] if ":" in expected_topic else expected_topic
+    return {
+        "text": query,
+        "target_topic": expected_topic,
+        "target_plain_topic": plain_topic,
+        "target_terms": topic_terms(plain_topic),
+    }
+
+
+def describe_candidate_relation(
+    *,
+    current: NodeFrame,
+    dst: NodeFrame,
+    edge: EdgeFrame,
+    expected_topic: str,
+    teacher: dict[str, float],
+    retrieval_reason: str,
+) -> dict[str, object]:
+    same_topic = dst.metadata["topic"] == expected_topic
+    source_same_as_destination = current.metadata["topic"] == dst.metadata["topic"]
+    if same_topic:
+        decision_hint = "target_topic_match"
+    elif teacher["read_full"] >= 0.45:
+        decision_hint = "lexically_ambiguous_wrong_topic"
+    else:
+        decision_hint = "off_topic"
+    return {
+        "source_topic": current.metadata["topic"],
+        "destination_topic": dst.metadata["topic"],
+        "destination_plain_topic": dst.metadata.get("plain_topic", ""),
+        "destination_terms": list(dst.metadata.get("terms", ())),
+        "same_as_query_topic": same_topic,
+        "same_as_source_topic": source_same_as_destination,
+        "edge_confidence": round(edge.confidence, 6),
+        "retrieval_reason": retrieval_reason,
+        "query_topic_terms": topic_terms(expected_topic.split(":", 1)[1] if ":" in expected_topic else expected_topic),
+        "overlap_with_query_topic_terms": sorted(
+            set(dst.metadata.get("terms", ()))
+            & set(topic_terms(expected_topic.split(":", 1)[1] if ":" in expected_topic else expected_topic))
+        ),
+        "decision_hint": decision_hint,
     }
 
 
@@ -301,6 +499,13 @@ def make_query(topic: str, terms: Sequence[str], rng: random.Random) -> str:
         ]
     )
     return f"{style} {plain_topic} {sampled}"
+
+
+def topic_terms(plain_topic: str) -> list[str]:
+    for topic, terms in TOPIC_BANK:
+        if topic == plain_topic:
+            return list(terms)
+    return []
 
 
 def make_summary(

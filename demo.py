@@ -67,9 +67,10 @@ def main() -> None:
 
     print("Query traversal from seed 'python'")
     print("Included:")
-    for decision in sorted(result.included, key=lambda item: (-item.include_score, item.node_id)):
+    for decision in result.included:
         print(
             f"  {decision.node_id:8s} "
+            f"result={decision.result_score:.3f} "
             f"include={decision.include_score:.3f} "
             f"follow={decision.follow_score:.3f} "
             f"read_full={decision.read_full} "
@@ -94,4 +95,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

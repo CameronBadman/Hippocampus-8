@@ -32,20 +32,34 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=9091)
     args = parser.parse_args()
 
-    output_dir = Path(args.output_dir)
+    generate_benchmark(
+        output_dir=Path(args.output_dir),
+        traversal_cases=args.traversal_cases,
+        attach_cases=args.attach_cases,
+        seed=args.seed,
+    )
+
+
+def generate_benchmark(
+    *,
+    output_dir: Path,
+    traversal_cases: int,
+    attach_cases: int,
+    seed: int,
+) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-    rng = random.Random(args.seed)
+    rng = random.Random(seed)
     topics = [random_unit_vector(rng, SUMMARY_DIM) for _ in range(28)]
     full_topics = [resize_vector(topic, FULL_DIM) for topic in topics]
 
     traversal_path = output_dir / "traversal_ranking.jsonl"
     attach_path = output_dir / "attach_ranking.jsonl"
-    write_traversal_cases(traversal_path, rng=rng, topics=topics, count=args.traversal_cases)
-    write_attach_cases(attach_path, rng=rng, topics=topics, full_topics=full_topics, count=args.attach_cases)
+    write_traversal_cases(traversal_path, rng=rng, topics=topics, count=traversal_cases)
+    write_attach_cases(attach_path, rng=rng, topics=topics, full_topics=full_topics, count=attach_cases)
 
     manifest = {
         "schema_version": 1,
-        "seed": args.seed,
+        "seed": seed,
         "dimensions": {
             "query": QUERY_DIM,
             "summary": SUMMARY_DIM,
@@ -59,8 +73,8 @@ def main() -> None:
             "attach": attach_path.name,
         },
         "cases": {
-            "traversal": args.traversal_cases,
-            "attach": args.attach_cases,
+            "traversal": traversal_cases,
+            "attach": attach_cases,
         },
         "candidate_types": [
             "positive",

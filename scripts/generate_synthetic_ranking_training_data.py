@@ -4,7 +4,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from generate_synthetic_benchmark import main as benchmark_main
+from generate_synthetic_benchmark import generate_benchmark
 
 
 def main() -> None:
@@ -15,24 +15,15 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=4242)
     args = parser.parse_args()
 
-    # Reuse the hard ranking-case generator, but with a different seed and
-    # output directory so benchmark cases never leak into training.
-    import sys
-
-    sys.argv = [
-        "generate_synthetic_benchmark.py",
-        "--output-dir",
-        str(Path(args.output_dir)),
-        "--traversal-cases",
-        str(args.traversal_cases),
-        "--attach-cases",
-        str(args.attach_cases),
-        "--seed",
-        str(args.seed),
-    ]
-    benchmark_main()
+    # Reuse the hard ranking-case generator with a different seed and output
+    # directory so benchmark cases never leak into training.
+    generate_benchmark(
+        output_dir=Path(args.output_dir),
+        traversal_cases=args.traversal_cases,
+        attach_cases=args.attach_cases,
+        seed=args.seed,
+    )
 
 
 if __name__ == "__main__":
     main()
-

@@ -1,7 +1,11 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.ruff_cache/
 .venv/
+*.egg-info/
+data/
+reports/
+teacher_runs/
 models/*.pt
 models/*.pth
-

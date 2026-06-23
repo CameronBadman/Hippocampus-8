@@ -75,14 +75,16 @@ class TraversalIndex:
         if node_index is None:
             return
 
-        buckets = self._node_buckets.pop(node_id, ())
-        for bucket in buckets:
-            members = self._buckets.get(bucket)
-            if members is None:
-                continue
-            members.discard(node_index)
-            if not members:
-                del self._buckets[bucket]
+        self._node_buckets.pop(node_id, None)
+        del self._node_ids[node_index]
+        del self._vectors[node_index]
+        self._id_to_index = {active_node_id: index for index, active_node_id in enumerate(self._node_ids)}
+        self._buckets = defaultdict(set)
+        for active_node_id, buckets in self._node_buckets.items():
+            active_index = self._id_to_index[active_node_id]
+            for bucket in buckets:
+                self._buckets[bucket].add(active_index)
+        self._matrix_dirty = True
 
     def query(self, vector: Sequence[float], *, limit: int = 8) -> tuple[TraversalIndexHit, ...]:
         if limit <= 0:
