@@ -287,10 +287,11 @@ def parse_labels(content: str, *, expected_ids: list[str]) -> dict[str, dict[str
     if not isinstance(rows, list):
         raise ValueError("teacher response must contain a candidates list")
     labels: dict[str, dict[str, float]] = {}
+    expected_id_set = set(expected_ids)
     for row in rows:
         candidate_id = row.get("id")
-        if candidate_id not in expected_ids:
-            raise ValueError(f"unexpected candidate id in teacher response: {candidate_id}")
+        if candidate_id not in expected_id_set:
+            continue
         labels[candidate_id] = {key: clamp01(float(row[key])) for key in SCORE_KEYS}
     missing = [candidate_id for candidate_id in expected_ids if candidate_id not in labels]
     if missing:

@@ -1,3 +1,4 @@
+import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -394,6 +395,46 @@ class TorchModelTests(unittest.TestCase):
         self.assertTrue(is_non_retryable_http_error(401, '{"error":{"message":"bad key"}}'))
         self.assertFalse(is_non_retryable_http_error(429, '{"error":{"message":"rate limited"}}'))
         self.assertFalse(is_non_retryable_http_error(500, '{"error":{"message":"server failed"}}'))
+
+    def test_qwen_label_parser_ignores_hallucinated_extra_candidate_ids(self) -> None:
+        from scripts.label_teacher_episodes_qwen import parse_labels
+
+        labels = parse_labels(
+            json.dumps(
+                {
+                    "candidates": [
+                        {
+                            "id": "candidate-0",
+                            "follow": 0.2,
+                            "read_full": 0.8,
+                            "include": 0.7,
+                            "expand": 0.3,
+                            "stop": 0.1,
+                        },
+                        {
+                            "id": "candidate-1",
+                            "follow": 0.1,
+                            "read_full": 0.4,
+                            "include": 0.2,
+                            "expand": 0.0,
+                            "stop": 0.9,
+                        },
+                        {
+                            "id": "candidate-2",
+                            "follow": 1.0,
+                            "read_full": 1.0,
+                            "include": 1.0,
+                            "expand": 1.0,
+                            "stop": 0.0,
+                        },
+                    ]
+                }
+            ),
+            expected_ids=["candidate-0", "candidate-1"],
+        )
+
+        self.assertEqual(set(labels), {"candidate-0", "candidate-1"})
+        self.assertEqual(labels["candidate-0"]["include"], 0.7)
 
     def test_qwen_shard_runner_marks_short_success_as_partial(self) -> None:
         from scripts.run_qwen_label_shards import classify_shard_status
