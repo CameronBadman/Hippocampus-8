@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 from vector_graph import embed_text
-from vector_graph.vectors import blend_vectors, resize_vector, stable_edge_vector
+from vector_graph.vectors import blend_vectors, effective_summary_vector, metadata_vector_from, resize_vector, stable_edge_vector
 
 
 def main() -> None:
@@ -56,13 +56,21 @@ def write_regression_files(episodes: Sequence[dict], *, data_dir: Path, teacher_
         data_dir / "attach_000.jsonl"
     ).open("w", encoding="utf-8") as attach_output:
         for episode in episodes:
-            query = embed_text(episode["query"], 32)
-            current_summary = embed_text(episode["current_node"]["summary"], 32)
+            query = effective_text_vector(episode["query"], episode.get("query_intent", {}), 32)
+            current_summary = effective_text_vector(
+                episode["current_node"]["summary"],
+                node_metadata(episode.get("current_node", {})),
+                32,
+            )
             path_vector = episode_path_vector(episode)
             new_full = embed_text(episode["query"] + " " + episode["expected_topic"], 64)
             for candidate in episode["candidates"]:
                 teacher = candidate_teacher(candidate, teacher_key)
-                dst_summary = embed_text(candidate["node_summary"], 32)
+                dst_summary = effective_text_vector(
+                    candidate["node_summary"],
+                    candidate_metadata(candidate),
+                    32,
+                )
                 dst_full = embed_text(candidate.get("node_full") or candidate["node_summary"], 64)
                 edge = stable_edge_vector(current_summary, dst_summary, 16)
                 target = teacher_target(teacher)
@@ -114,15 +122,23 @@ def write_ranking_files(episodes: Sequence[dict], *, ranking_dir: Path, teacher_
         ranking_dir / "attach_ranking.jsonl"
     ).open("w", encoding="utf-8") as attach_output:
         for episode in episodes:
-            query = embed_text(episode["query"], 32)
-            current_summary = embed_text(episode["current_node"]["summary"], 32)
+            query = effective_text_vector(episode["query"], episode.get("query_intent", {}), 32)
+            current_summary = effective_text_vector(
+                episode["current_node"]["summary"],
+                node_metadata(episode.get("current_node", {})),
+                32,
+            )
             path_vector = episode_path_vector(episode)
             new_full = embed_text(episode["query"] + " " + episode["expected_topic"], 64)
             traversal_candidates = []
             attach_candidates = []
             for candidate in episode["candidates"]:
                 teacher = candidate_teacher(candidate, teacher_key)
-                dst_summary = embed_text(candidate["node_summary"], 32)
+                dst_summary = effective_text_vector(
+                    candidate["node_summary"],
+                    candidate_metadata(candidate),
+                    32,
+                )
                 dst_full = embed_text(candidate.get("node_full") or candidate["node_summary"], 64)
                 traversal_target = float(teacher["follow"])
                 result_target = float(teacher.get("result", teacher["include"]))
@@ -224,10 +240,38 @@ def rank_weight(score: float) -> float:
 
 
 def episode_path_vector(episode: dict):
-    summaries = [embed_text(node["summary"], 32) for node in episode.get("path", [])]
+    summaries = [
+        effective_text_vector(node["summary"], node_metadata(node), 32)
+        for node in episode.get("path", [])
+    ]
     if not summaries:
-        return embed_text(episode["query"], 32)
+        return effective_text_vector(episode["query"], episode.get("query_intent", {}), 32)
     return blend_vectors(summaries, 32)
+
+
+def effective_text_vector(text: str, metadata: dict, dimension: int):
+    summary = embed_text(text, dimension)
+    metadata_vector = metadata_vector_from(metadata, dimension)
+    return effective_summary_vector(summary, metadata_vector, dimension=dimension)
+
+
+def node_metadata(node: dict) -> dict:
+    return {
+        "topic": node.get("topic", ""),
+        "plain_topic": node.get("plain_topic", ""),
+        "terms": node.get("terms", []),
+    }
+
+
+def candidate_metadata(candidate: dict) -> dict:
+    return {
+        "topic": candidate.get("node_topic") or candidate.get("destination_topic", ""),
+        "plain_topic": candidate.get("destination_plain_topic", ""),
+        "terms": candidate.get("destination_terms", []),
+        "kind": candidate.get("kind", ""),
+        "retrieval_reason": candidate.get("retrieval_reason", ""),
+        "relation": candidate.get("relation", {}),
+    }
 
 
 def read_episodes(episodes_dir: Path) -> Iterable[dict]:
@@ -248,6 +292,8 @@ def write_manifest(data_dir: Path, *, traversal_count: int, attach_count: int) -
             "edge": 16,
             "full": 64,
             "path": 32,
+            "metadata": 32,
+            "traversal": 16,
             "scalars": 2,
         },
         "shards": [
@@ -265,6 +311,10 @@ def write_manifest(data_dir: Path, *, traversal_count: int, attach_count: int) -
 def write_ranking_manifest(ranking_dir: Path, *, traversal_ranking_count: int, attach_ranking_count: int) -> None:
     manifest = {
         "schema_version": 1,
+        "dimensions": {
+            "metadata": 32,
+            "traversal": 16,
+        },
         "traversal_ranking": "traversal_ranking.jsonl",
         "traversal_ranking_cases": traversal_ranking_count,
         "attach_ranking": "attach_ranking.jsonl",

@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import Sequence
 
 from vector_graph import EdgeFrame, GraphStore, NodeFrame, TraversalIndex, TraversalIndexConfig, embed_text
-from vector_graph.scorer import path_vector_for
-from vector_graph.vectors import cosine01, resize_vector, stable_edge_vector
+from vector_graph.scorer import effective_node_summary, path_vector_for
+from vector_graph.vectors import cosine01, metadata_vector_from, resize_vector, stable_edge_vector, traversal_vector_from
 
 
 TOPIC_BANK = [
@@ -132,18 +132,22 @@ def build_domain(
             summary = make_summary(topic, node_index, node_terms, distractor_topic, distractor_terms, rng)
             full = make_full(summary, topic, node_terms, rng)
             node_id = f"{domain_name}:{topic}:{node_index:04d}"
+            metadata = {
+                "topic": topic_name,
+                "plain_topic": topic,
+                "terms": node_terms,
+            }
+            summary_vector = embed_text(summary, 32)
+            metadata_vector = metadata_vector_from(metadata, 32)
             frame = NodeFrame(
                 node_id=node_id,
-                summary_vector=embed_text(summary, 32),
+                summary_vector=summary_vector,
                 full_vector=embed_text(full, 64),
                 summary_payload=summary,
                 full_payload=full,
-                metadata={
-                    "topic": topic_name,
-                    "plain_topic": topic,
-                    "terms": node_terms,
-                    "traversal_vector": resize_vector(embed_text(summary, 32), 16),
-                },
+                metadata=metadata,
+                metadata_vector=metadata_vector,
+                traversal_vector=traversal_vector_from(summary_vector, metadata_vector, 16),
             )
             store.add_node(frame)
             index.add_node(frame)
@@ -325,7 +329,11 @@ def add_query_target_candidates(
             EdgeFrame(
                 src_id=parent_id,
                 dst_id=generated.frame.node_id,
-                edge_vector=stable_edge_vector(parent.summary_vector, generated.frame.summary_vector, 16),
+                edge_vector=stable_edge_vector(
+                    effective_node_summary(parent, dimension=16),
+                    effective_node_summary(generated.frame, dimension=16),
+                    16,
+                ),
                 confidence=0.82,
             ),
             "nearest_target_topic_candidate",
@@ -398,7 +406,11 @@ def add_lexical_hard_negatives(
             EdgeFrame(
                 src_id=parent_id,
                 dst_id=generated.frame.node_id,
-                edge_vector=stable_edge_vector(parent.summary_vector, generated.frame.summary_vector, 16),
+                edge_vector=stable_edge_vector(
+                    effective_node_summary(parent, dimension=16),
+                    effective_node_summary(generated.frame, dimension=16),
+                    16,
+                ),
                 confidence=0.58,
             ),
             "lexical_hard_negative_candidate",
@@ -460,10 +472,12 @@ def bootstrap_teacher_scores(
     expected_topic: str,
 ) -> dict[str, float]:
     same_topic = 1.0 if dst.metadata["topic"] == expected_topic else 0.0
-    query_match = cosine01(query_vector, dst.summary_vector)
+    dst_effective = effective_node_summary(dst)
+    current_effective = effective_node_summary(current)
+    query_match = cosine01(query_vector, dst_effective)
     edge_match = cosine01(resize_vector(query_vector, len(edge.edge_vector)), edge.edge_vector)
-    path_match = cosine01(path_vector, dst.summary_vector)
-    current_match = cosine01(current.summary_vector, dst.summary_vector)
+    path_match = cosine01(path_vector, dst_effective)
+    current_match = cosine01(current_effective, dst_effective)
     follow = clamp01(same_topic * 0.58 + query_match * 0.22 + edge_match * 0.12 + edge.confidence * 0.08)
     include = clamp01(same_topic * 0.65 + query_match * 0.25 + path_match * 0.10)
     expand = clamp01(same_topic * 0.50 + current_match * 0.20 + edge.confidence * 0.20 + edge_match * 0.10)
@@ -535,7 +549,11 @@ def add_edge(store: GraphStore, src: NodeFrame, dst: NodeFrame, *, confidence: f
         EdgeFrame(
             src_id=src.node_id,
             dst_id=dst.node_id,
-            edge_vector=stable_edge_vector(src.summary_vector, dst.summary_vector, 16),
+            edge_vector=stable_edge_vector(
+                effective_node_summary(src, dimension=16),
+                effective_node_summary(dst, dimension=16),
+                16,
+            ),
             confidence=max(0.0, min(1.0, confidence)),
         )
     )

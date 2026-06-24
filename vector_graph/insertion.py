@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Callable, Sequence, cast
 
 from .frames import EdgeFrame, NodeFrame
-from .scorer import TraversalScorer, path_vector_for
+from .scorer import TraversalScorer, effective_node_summary, path_vector_for
 from .store import GraphStore
 from .traversal import TraversalConfig, TraversalController
 from .vectors import stable_edge_vector
@@ -75,13 +75,21 @@ def insert_node(
         forward = EdgeFrame(
             src_id=node.node_id,
             dst_id=candidate_id,
-            edge_vector=stable_edge_vector(node.summary_vector, candidate.summary_vector, config.edge_dimension),
+            edge_vector=stable_edge_vector(
+                effective_node_summary(node, dimension=config.edge_dimension),
+                effective_node_summary(candidate, dimension=config.edge_dimension),
+                config.edge_dimension,
+            ),
             confidence=score,
         )
         reverse = EdgeFrame(
             src_id=candidate_id,
             dst_id=node.node_id,
-            edge_vector=stable_edge_vector(candidate.summary_vector, node.summary_vector, config.edge_dimension),
+            edge_vector=stable_edge_vector(
+                effective_node_summary(candidate, dimension=config.edge_dimension),
+                effective_node_summary(node, dimension=config.edge_dimension),
+                config.edge_dimension,
+            ),
             confidence=score,
         )
         store.add_edge(forward)

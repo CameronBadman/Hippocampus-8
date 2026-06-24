@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 import math
 from typing import Any
 
-from .vectors import Vector, as_vector
+from .vectors import Vector, as_vector, metadata_vector_from, traversal_vector_from
 
 
 @dataclass(frozen=True)
@@ -16,6 +16,8 @@ class NodeFrame:
     full_payload: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     version: int = 1
+    metadata_vector: Vector | None = None
+    traversal_vector: Vector | None = None
 
     def __post_init__(self) -> None:
         if not self.node_id:
@@ -23,6 +25,26 @@ class NodeFrame:
         object.__setattr__(self, "summary_vector", as_vector(self.summary_vector))
         if self.full_vector is not None:
             object.__setattr__(self, "full_vector", as_vector(self.full_vector))
+        if self.metadata_vector is None:
+            object.__setattr__(
+                self,
+                "metadata_vector",
+                metadata_vector_from(self.metadata, len(self.summary_vector)),
+            )
+        else:
+            object.__setattr__(self, "metadata_vector", as_vector(self.metadata_vector))
+
+        legacy_traversal_vector = self.metadata.get("traversal_vector")
+        if self.traversal_vector is not None:
+            object.__setattr__(self, "traversal_vector", as_vector(self.traversal_vector))
+        elif legacy_traversal_vector is not None:
+            object.__setattr__(self, "traversal_vector", as_vector(legacy_traversal_vector))
+        else:
+            object.__setattr__(
+                self,
+                "traversal_vector",
+                traversal_vector_from(self.summary_vector, self.metadata_vector),
+            )
 
 
 @dataclass(frozen=True)

@@ -128,7 +128,7 @@ class TraversalIndex:
         return len(self._id_to_index)
 
     def _default_vector(self, node: NodeFrame) -> Sequence[float]:
-        traversal_vector = node.metadata.get("traversal_vector")
+        traversal_vector = node.traversal_vector
         if traversal_vector is not None:
             return as_vector(traversal_vector)
         return node.summary_vector

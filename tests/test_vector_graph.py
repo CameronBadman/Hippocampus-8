@@ -12,8 +12,10 @@ from vector_graph import (
     TraversalController,
     TraversalIndex,
     TraversalIndexConfig,
+    canonical_metadata_text,
     embed_text,
     insert_node,
+    metadata_vector_from,
 )
 from vector_graph.frames import TraversalScores
 from vector_graph.vectors import stable_edge_vector
@@ -380,6 +382,75 @@ class VectorGraphTests(unittest.TestCase):
         index.add_nodes(frames)
 
         self.assertEqual(index.seed_ids(target_vector, limit=1), ("target",))
+
+    def test_node_frame_vectorizes_metadata_deterministically(self) -> None:
+        first = NodeFrame(
+            node_id="memory",
+            summary_vector=embed_text("ambiguous memory", 32),
+            metadata={"project": "hippo", "kind": "preference", "terms": ["deterministic", "memory"]},
+        )
+        second = NodeFrame(
+            node_id="memory",
+            summary_vector=embed_text("ambiguous memory", 32),
+            metadata={"terms": ["deterministic", "memory"], "kind": "preference", "project": "hippo"},
+        )
+
+        self.assertEqual(
+            canonical_metadata_text(first.metadata),
+            "kind=preference | project=hippo | terms=[deterministic,memory]",
+        )
+        self.assertTrue((first.metadata_vector == second.metadata_vector).all())
+        self.assertEqual(len(first.metadata_vector), 32)
+        self.assertEqual(len(first.traversal_vector), 16)
+
+    def test_traversal_index_prefers_first_class_traversal_vector(self) -> None:
+        first_class_vector = [1.0] + [0.0] * 15
+        legacy_vector = [-1.0] + [0.0] * 15
+        frame = NodeFrame(
+            node_id="target",
+            summary_vector=embed_text("target words in summary", 32),
+            metadata={"traversal_vector": legacy_vector},
+            traversal_vector=first_class_vector,
+        )
+        index = TraversalIndex(config=TraversalIndexConfig(dimension=16, table_count=4, bits_per_table=4, seed=7))
+        index.add_node(frame)
+
+        self.assertEqual(index.seed_ids(first_class_vector, limit=1), ("target",))
+        self.assertEqual(index.seed_ids(legacy_vector, limit=1), ())
+
+    def test_heuristic_scorer_uses_metadata_vectors_for_ambiguous_summaries(self) -> None:
+        root = NodeFrame(node_id="root", summary_vector=embed_text("root", 32))
+        target = NodeFrame(
+            node_id="target",
+            summary_vector=embed_text("ambiguous memory note", 32),
+            metadata={"project": "hippo", "kind": "preference"},
+        )
+        distractor = NodeFrame(
+            node_id="distractor",
+            summary_vector=embed_text("ambiguous memory note", 32),
+            metadata={"project": "billing", "kind": "incident"},
+        )
+        scorer = HeuristicTraversalScorer()
+        query = metadata_vector_from({"project": "hippo", "kind": "preference"}, 32)
+
+        target_scores = scorer.score_edge(
+            query_vector=query,
+            current_node=root,
+            edge=EdgeFrame("root", "target", stable_edge_vector(root.summary_vector, target.summary_vector, 16)),
+            dst_node=target,
+            path_vector=root.summary_vector,
+            hop=0,
+        )
+        distractor_scores = scorer.score_edge(
+            query_vector=query,
+            current_node=root,
+            edge=EdgeFrame("root", "distractor", stable_edge_vector(root.summary_vector, distractor.summary_vector, 16)),
+            dst_node=distractor,
+            path_vector=root.summary_vector,
+            hop=0,
+        )
+
+        self.assertGreater(target_scores.result_score, distractor_scores.result_score)
 
     def test_traversal_index_removes_replaced_nodes(self) -> None:
         old_vector = [1.0] + [0.0] * 15

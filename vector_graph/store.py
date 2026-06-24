@@ -70,11 +70,12 @@ class GraphStore:
 
     def find_nearest_summary(self, query_vector: tuple[float, ...], *, limit: int = 1) -> tuple[NodeFrame, ...]:
         from .vectors import cosine01
+        from .scorer import effective_node_summary
 
         if limit <= 0:
             raise ValueError("limit must be positive")
         scored = [
-            (cosine01(query_vector, node.summary_vector), node.node_id, node)
+            (cosine01(query_vector, effective_node_summary(node, dimension=len(query_vector))), node.node_id, node)
             for node in self._nodes.values()
         ]
         scored.sort(key=lambda item: (-item[0], item[1]))

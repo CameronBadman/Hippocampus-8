@@ -204,7 +204,8 @@ def build_graph(
             node_id=node_id,
             summary_vector=resize_vector(traversal_vector, 32),
             full_vector=resize_vector(traversal_vector, 64),
-            metadata={"traversal_vector": traversal_vector, "cluster": cluster},
+            metadata={"cluster": cluster},
+            traversal_vector=traversal_vector,
         )
         store.add_node(node)
         index.add_node(node)

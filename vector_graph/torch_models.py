@@ -13,7 +13,7 @@ except ImportError as exc:  # pragma: no cover - exercised only without torch in
     ) from exc
 
 from .frames import EdgeFrame, NodeFrame, TraversalScores
-from .scorer import TraversalScorer
+from .scorer import TraversalScorer, effective_node_summary
 from .vectors import resize_vector
 
 
@@ -394,7 +394,7 @@ class TorchTraversalScorer(TraversalScorer):
 
         rows = []
         query = resize_vector(query_vector, self.config.query_dim)
-        current_summary = resize_vector(current_node.summary_vector, self.config.summary_dim)
+        current_summary = resize_vector(effective_node_summary(current_node), self.config.summary_dim)
         path = resize_vector(path_vector, self.config.path_dim)
         for edge, dst_node in zip(edges, dst_nodes):
             rows.append(
@@ -402,7 +402,7 @@ class TorchTraversalScorer(TraversalScorer):
                     query,
                     current_summary,
                     resize_vector(edge.edge_vector, self.config.edge_dim),
-                    resize_vector(dst_node.summary_vector, self.config.summary_dim),
+                    resize_vector(effective_node_summary(dst_node), self.config.summary_dim),
                     path,
                     traversal_scalars(edge.confidence, hop, self.config.scalar_dim),
                 ]
@@ -444,8 +444,8 @@ class TorchTraversalScorer(TraversalScorer):
             candidate_full = candidate_node.full_vector if candidate_node.full_vector is not None else candidate_node.summary_vector
             rows.append(
                 [
-                    resize_vector(new_node.summary_vector, self.config.summary_dim),
-                    resize_vector(candidate_node.summary_vector, self.config.summary_dim),
+                    resize_vector(effective_node_summary(new_node), self.config.summary_dim),
+                    resize_vector(effective_node_summary(candidate_node), self.config.summary_dim),
                     resize_vector(new_full, self.config.full_dim),
                     resize_vector(candidate_full, self.config.full_dim),
                     resize_vector(path_vector, self.config.path_dim),

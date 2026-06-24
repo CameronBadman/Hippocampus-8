@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Protocol, Sequence
 
 from .frames import EdgeFrame, NodeFrame, TraversalScores
-from .vectors import blend_vectors, clamp01, cosine01, resize_vector
+from .vectors import blend_vectors, clamp01, cosine01, effective_summary_vector, resize_vector
 
 
 class TraversalScorer(Protocol):
@@ -47,11 +47,13 @@ class HeuristicTraversalScorer:
         hop: int,
     ) -> TraversalScores:
         edge_query = resize_vector(query_vector, len(edge.edge_vector))
+        current_effective = effective_node_summary(current_node)
+        dst_effective = effective_node_summary(dst_node)
 
-        query_to_dst = cosine01(query_vector, dst_node.summary_vector)
-        current_to_dst = cosine01(current_node.summary_vector, dst_node.summary_vector)
+        query_to_dst = cosine01(query_vector, dst_effective)
+        current_to_dst = cosine01(current_effective, dst_effective)
         query_to_edge = cosine01(edge_query, edge.edge_vector)
-        path_to_dst = cosine01(path_vector, dst_node.summary_vector)
+        path_to_dst = cosine01(path_vector, dst_effective)
 
         follow_score = clamp01(
             query_to_dst * 0.50
@@ -96,8 +98,10 @@ class HeuristicTraversalScorer:
         else:
             full_score = cosine01(new_node.summary_vector, candidate_node.summary_vector)
 
-        path_score = cosine01(path_vector, candidate_node.summary_vector)
-        summary_score = cosine01(new_node.summary_vector, candidate_node.summary_vector)
+        new_effective = effective_node_summary(new_node)
+        candidate_effective = effective_node_summary(candidate_node)
+        path_score = cosine01(path_vector, candidate_effective)
+        summary_score = cosine01(new_effective, candidate_effective)
         return clamp01(summary_score * 0.60 + full_score * 0.30 + path_score * 0.10)
 
     def score_attach_batch(
@@ -120,4 +124,14 @@ class HeuristicTraversalScorer:
 
 
 def path_vector_for(nodes: Sequence[NodeFrame], dimension: int) -> tuple[float, ...]:
-    return blend_vectors([node.summary_vector for node in nodes], dimension)
+    return blend_vectors([effective_node_summary(node, dimension=dimension) for node in nodes], dimension)
+
+
+def effective_node_summary(node: NodeFrame, *, dimension: int | None = None) -> tuple[float, ...]:
+    return tuple(
+        effective_summary_vector(
+            node.summary_vector,
+            node.metadata_vector,
+            dimension=dimension or len(node.summary_vector),
+        )
+    )

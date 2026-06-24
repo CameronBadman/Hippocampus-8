@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import re
-from typing import Iterable, Sequence
+from collections.abc import Mapping
+from typing import Any, Iterable, Sequence
 
 import numpy as np
 from numpy.typing import NDArray
@@ -84,6 +86,56 @@ def blend_vectors(vectors: Sequence[Sequence[float]], dimension: int) -> Vector:
     return normalize(blended)
 
 
+def canonical_metadata_text(metadata: Mapping[str, Any]) -> str:
+    """Return a stable text representation of node metadata.
+
+    Raw vector-valued operational fields are intentionally skipped. They are
+    already frame inputs, and serializing them back into metadata text would
+    make the derived metadata vector noisy and expensive.
+    """
+
+    parts = []
+    for raw_key in sorted(metadata.keys(), key=lambda item: str(item)):
+        key = str(raw_key)
+        value = metadata[raw_key]
+        if _is_vector_like(value):
+            continue
+        normalized = _canonical_metadata_value(value)
+        if normalized:
+            parts.append(f"{key}={normalized}")
+    return " | ".join(parts)
+
+
+def metadata_vector_from(metadata: Mapping[str, Any], dimension: int = 32) -> Vector:
+    return embed_text(canonical_metadata_text(metadata), dimension)
+
+
+def traversal_vector_from(
+    summary_vector: Sequence[float],
+    metadata_vector: Sequence[float] | None = None,
+    dimension: int = 16,
+) -> Vector:
+    if metadata_vector is None:
+        return resize_vector(summary_vector, dimension)
+    return blend_vectors([summary_vector, metadata_vector], dimension)
+
+
+def effective_summary_vector(
+    summary_vector: Sequence[float],
+    metadata_vector: Sequence[float] | None = None,
+    dimension: int | None = None,
+    *,
+    summary_weight: float = 0.78,
+    metadata_weight: float = 0.22,
+) -> Vector:
+    target_dimension = dimension or len(np.asarray(summary_vector, dtype=np.float32).reshape(-1))
+    summary = resize_vector(summary_vector, target_dimension)
+    if metadata_vector is None:
+        return summary
+    metadata = resize_vector(metadata_vector, target_dimension)
+    return normalize(summary * summary_weight + metadata * metadata_weight)
+
+
 def embed_text(text: str, dimension: int = 64) -> Vector:
     """Deterministic lightweight text vector for demos and tests.
 
@@ -127,3 +179,38 @@ def _shared_arrays(left: Sequence[float], right: Sequence[float]) -> tuple[NDArr
     right_array = np.asarray(right, dtype=np.float32).reshape(-1)
     shared = min(left_array.shape[0], right_array.shape[0])
     return left_array[:shared], right_array[:shared]
+
+
+def _canonical_metadata_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int | float):
+        if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+            return ""
+        return str(value)
+    if isinstance(value, str):
+        return value.strip().lower()
+    if isinstance(value, Mapping):
+        nested = [
+            f"{key}:{_canonical_metadata_value(value[raw_key])}"
+            for raw_key in sorted(value.keys(), key=lambda item: str(item))
+            for key in [str(raw_key)]
+        ]
+        return "{" + ",".join(item for item in nested if not item.endswith(":")) + "}"
+    if isinstance(value, set | frozenset):
+        return "[" + ",".join(sorted(_canonical_metadata_value(item) for item in value)) + "]"
+    if isinstance(value, Sequence) and not isinstance(value, bytes | bytearray):
+        return "[" + ",".join(_canonical_metadata_value(item) for item in value) + "]"
+    return str(value).strip().lower()
+
+
+def _is_vector_like(value: Any) -> bool:
+    if isinstance(value, np.ndarray):
+        return value.ndim > 0 and np.issubdtype(value.dtype, np.number)
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        if not value:
+            return False
+        return all(isinstance(item, int | float | np.integer | np.floating) for item in value)
+    return False

@@ -15,6 +15,7 @@ This is an engineer-demo prototype, not a production memory system yet.
 What works:
 
 - bounded node/edge graph storage
+- first-class deterministic metadata and traversal vectors
 - deterministic beam and single-path traversal
 - expressway nodes for long-range routing
 - compact deterministic seed index over traversal vectors
@@ -70,7 +71,7 @@ Run the local deterministic demo:
 
 The prototype separates graph state from model scoring:
 
-- `NodeFrame`: summary vector, optional full vector, payload, metadata
+- `NodeFrame`: summary vector, optional full vector, metadata vector, traversal vector, payload, metadata
 - `EdgeFrame`: compact relationship vector plus confidence
 - `TraversalScores`: `follow`, `read_full`, `include`, `expand`, `stop`, `result`
 - `TraversalController`: deterministic graph walk and result ordering
@@ -80,6 +81,10 @@ The prototype separates graph state from model scoring:
 `result_score` is the score used to order returned included nodes. It is
 separate from `follow_score` so the traversal can use bridge nodes without
 ranking those bridge nodes above final answers.
+
+Node metadata is vectorized automatically. Raw metadata stays available as a
+dict, but `metadata_vector` and compact `traversal_vector` are first-class frame
+fields and are used by index lookup and scorer inputs.
 
 ## Minimal Example
 
@@ -96,8 +101,20 @@ from vector_graph import (
 from vector_graph.vectors import stable_edge_vector
 
 store = GraphStore(max_outgoing_edges=16)
-store.add_node(NodeFrame("root", summary_vector=embed_text("graph memory", 32)))
-store.add_node(NodeFrame("answer", summary_vector=embed_text("vector frame traversal", 32)))
+store.add_node(
+    NodeFrame(
+        "root",
+        summary_vector=embed_text("graph memory", 32),
+        metadata={"project": "hippo", "kind": "seed"},
+    )
+)
+store.add_node(
+    NodeFrame(
+        "answer",
+        summary_vector=embed_text("vector frame traversal", 32),
+        metadata={"project": "hippo", "kind": "design"},
+    )
+)
 
 root = store.get_node("root")
 answer = store.get_node("answer")

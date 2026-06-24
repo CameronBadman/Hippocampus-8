@@ -1,3 +1,5 @@
+from typing import Any
+
 from vector_graph import (
     EdgeFrame,
     GraphStore,
@@ -12,13 +14,14 @@ from vector_graph import (
 from vector_graph.vectors import stable_edge_vector
 
 
-def make_node(node_id: str, summary: str, full: str) -> NodeFrame:
+def make_node(node_id: str, summary: str, full: str, metadata: dict[str, Any] | None = None) -> NodeFrame:
     return NodeFrame(
         node_id=node_id,
         summary_vector=embed_text(summary, 64),
         full_vector=embed_text(full, 128),
         summary_payload=summary,
         full_payload=full,
+        metadata=metadata or {},
     )
 
 
@@ -40,12 +43,12 @@ def main() -> None:
     scorer = HeuristicTraversalScorer()
 
     nodes = [
-        make_node("python", "Python programming language", "Python is used for scripting, ML, APIs, and tooling."),
-        make_node("torch", "PyTorch tensor neural network library", "PyTorch trains neural networks with tensors."),
-        make_node("bert", "BERT transformer encoder model", "BERT is a transformer encoder for scoring text or vector frames."),
-        make_node("graph", "Vector graph traversal system", "The graph stores node vectors and edge vectors."),
-        make_node("sqlite", "SQLite embedded database", "SQLite stores local structured data in one file."),
-        make_node("ann", "Approximate nearest neighbor vector search", "ANN finds seed nodes from query vectors."),
+        make_node("python", "Python programming language", "Python is used for scripting, ML, APIs, and tooling.", {"kind": "language"}),
+        make_node("torch", "PyTorch tensor neural network library", "PyTorch trains neural networks with tensors.", {"kind": "ml_library"}),
+        make_node("bert", "BERT transformer encoder model", "BERT is a transformer encoder for scoring text or vector frames.", {"kind": "model"}),
+        make_node("graph", "Vector graph traversal system", "The graph stores node vectors and edge vectors.", {"kind": "memory_engine"}),
+        make_node("sqlite", "SQLite embedded database", "SQLite stores local structured data in one file.", {"kind": "storage"}),
+        make_node("ann", "Approximate nearest neighbor vector search", "ANN finds seed nodes from query vectors.", {"kind": "index"}),
     ]
     for node in nodes:
         store.add_node(node)
@@ -81,6 +84,7 @@ def main() -> None:
         "edge_frames",
         "Compact edge vector frames for learned relationships",
         "Edge frames hold relationship geometry as a compact vector without symbolic relation types.",
+        {"kind": "relationship_frame"},
     )
     attached = insert_node(
         store=store,
