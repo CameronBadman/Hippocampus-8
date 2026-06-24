@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from scripts.generate_domain_validation import build_cases, write_cases
-from scripts.generate_domain_teacher_episodes import build_episodes
+from scripts.generate_domain_teacher_episodes import build_episodes, domain_pack_for
 
 
 class DomainValidationTests(unittest.TestCase):
@@ -69,6 +69,31 @@ class DomainValidationTests(unittest.TestCase):
                 sum(1 for candidate in episode["candidates"] if candidate["kind"] == "positive"),
                 2,
             )
+
+    def test_broad_domain_teacher_episodes_cover_many_workflows(self) -> None:
+        import random
+
+        domains = domain_pack_for("broad")
+        episodes = build_episodes(
+            episode_count=128,
+            candidate_limit=16,
+            rng=random.Random(5678),
+            domains=domains,
+        )
+        self.assertGreaterEqual(len(domains), 16)
+        self.assertGreaterEqual(sum(len(domain["queries"]) for domain in domains), 64)
+        self.assertEqual({len(episode["candidates"]) for episode in episodes}, {16})
+        self.assertGreaterEqual(len({episode["domain"] for episode in episodes}), 16)
+        self.assertGreaterEqual(len({episode["expected_topic"] for episode in episodes}), 64)
+        kinds = {
+            candidate["kind"]
+            for episode in episodes
+            for candidate in episode["candidates"]
+        }
+        self.assertIn("positive", kinds)
+        self.assertIn("bridge_positive", kinds)
+        self.assertIn("hard_same_domain_negative", kinds)
+        self.assertIn("cross_domain_negative", kinds)
 
 
 if __name__ == "__main__":

@@ -201,6 +201,7 @@ Domain-diverse Qwen-teacher episode path:
 
 ```bash
 .venv/bin/python scripts/generate_domain_teacher_episodes.py \
+  --domain-set all \
   --episodes 4096 \
   --candidate-limit 16 \
   --output-dir data/domain_teacher_episodes
@@ -219,6 +220,23 @@ This generator is designed to stress metadata scope: same-domain wrong workflow,
 cross-domain distractors, bridge nodes that should be followed but not included,
 compliance negatives, tenant/entity mismatches, and realistic operational
 phrasing.
+
+For a larger paid teacher run, use the broad/all domain sets instead of only
+raising the episode count on the curated pack:
+
+```bash
+.venv/bin/python scripts/generate_domain_teacher_episodes.py \
+  --domain-set all \
+  --episodes 12288 \
+  --candidate-limit 16 \
+  --output-dir data/domain_teacher_episodes_all_12288
+```
+
+`curated` contains the original five hand-authored business domains. `broad`
+adds 17 more verticals covering legal, security, insurance, HR, retail,
+education, energy, travel, media, manufacturing, banking, construction,
+telecom, food safety, property management, biotech labs, and nonprofit grants.
+`all` combines both sets.
 
 Train the transformer scorer:
 
