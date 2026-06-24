@@ -197,6 +197,29 @@ Qwen-teacher episode path:
   --output-ranking-dir data/teacher_ranked
 ```
 
+Domain-diverse Qwen-teacher episode path:
+
+```bash
+.venv/bin/python scripts/generate_domain_teacher_episodes.py \
+  --episodes 4096 \
+  --candidate-limit 16 \
+  --output-dir data/domain_teacher_episodes
+
+.venv/bin/python scripts/run_qwen_label_shards.py \
+  --episodes-dir data/domain_teacher_episodes \
+  --output-dir data/qwen_domain_teacher_episodes \
+  --shard-count 256 \
+  --expected-per-shard 16 \
+  --request-timeout 60 \
+  --retries 2 \
+  --continue-on-failure
+```
+
+This generator is designed to stress metadata scope: same-domain wrong workflow,
+cross-domain distractors, bridge nodes that should be followed but not included,
+compliance negatives, tenant/entity mismatches, and realistic operational
+phrasing.
+
 Train the transformer scorer:
 
 ```bash

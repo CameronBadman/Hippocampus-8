@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from scripts.generate_domain_validation import build_cases, write_cases
+from scripts.generate_domain_teacher_episodes import build_episodes
 
 
 class DomainValidationTests(unittest.TestCase):
@@ -46,6 +47,28 @@ class DomainValidationTests(unittest.TestCase):
             self.assertEqual(manifest["attach_ranking_cases"], 10)
             self.assertTrue((output_dir / "traversal_ranking.jsonl").exists())
             self.assertTrue((output_dir / "attach_ranking.jsonl").exists())
+
+    def test_domain_teacher_episodes_include_fixed_size_hard_negatives(self) -> None:
+        import random
+
+        episodes = build_episodes(episode_count=20, candidate_limit=16, rng=random.Random(1234))
+        self.assertEqual(len(episodes), 20)
+        self.assertEqual({len(episode["candidates"]) for episode in episodes}, {16})
+        kinds = {
+            candidate["kind"]
+            for episode in episodes
+            for candidate in episode["candidates"]
+        }
+        self.assertIn("positive", kinds)
+        self.assertIn("bridge_positive", kinds)
+        self.assertIn("hard_same_domain_negative", kinds)
+        self.assertIn("cross_domain_negative", kinds)
+        for episode in episodes:
+            self.assertIn("negative_policy", episode["query_intent"])
+            self.assertGreaterEqual(
+                sum(1 for candidate in episode["candidates"] if candidate["kind"] == "positive"),
+                2,
+            )
 
 
 if __name__ == "__main__":
