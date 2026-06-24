@@ -3,8 +3,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Iterable, Sequence
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from vector_graph import embed_text
 from vector_graph.vectors import blend_vectors, effective_summary_vector, metadata_vector_from, resize_vector, stable_edge_vector
