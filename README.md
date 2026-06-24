@@ -229,6 +229,24 @@ hard-negative pairwise accuracy, calibration (`brier_score`, `ece_10`), scoring
 latency, and per-action traversal quality for `follow`, `read_full`, `include`,
 `expand`, `stop`, and `result` when teacher oracle vectors are present.
 
+Curated domain validation without Qwen-teacher targets:
+
+```bash
+.venv/bin/python scripts/generate_domain_validation.py \
+  --output-dir data/domain_validation_curated
+
+.venv/bin/python scripts/benchmark_scorer.py \
+  --checkpoint models/scorer.pt \
+  --benchmark-dir data/domain_validation_curated \
+  --batch-size 4096 \
+  --json-output reports/domain_validation.json
+```
+
+This pack is hand-authored across SaaS billing, fintech risk, healthcare ops,
+supply chain, and DevOps incident domains. It is still not customer data, but it
+is a stricter validation than the teacher holdout because labels are manually
+assigned and include same-domain hard negatives.
+
 Index plus traversal benchmark:
 
 ```bash
