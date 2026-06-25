@@ -311,6 +311,116 @@ synthetic path. For serious runs, prefer the explicit commands in the training
 section so the data directory, report path, checkpoint name, commit SHA, and
 split semantics are captured in a manifest.
 
+### Local Colab Keepalive Sidecar
+
+Codex is not required to keep a long Colab job warm. The local sidecar owns a
+Colab adapter session, prints a Colab URL, waits for the browser bridge to
+connect, then periodically adds a tiny heartbeat/status cell, runs it, writes a
+local status JSON file, and deletes the temporary cell.
+
+```bash
+/home/cameron/projects/google-collab-codex-con/.venv/bin/python \
+  scripts/colab_keepalive_sidecar.py \
+  --adapter-repo /home/cameron/projects/google-collab-codex-con \
+  --interval-seconds 180 \
+  --mode both \
+  --cleanup-existing
+```
+
+By default it summarizes these Colab-side status files if they exist:
+
+```text
+/content/qwen_all_12288_background_status.json
+/content/qwen_domain_labeler_background_status.json
+```
+
+Add more files with repeated `--remote-status-path` arguments. The latest local
+sidecar state is written to `.colab_keepalive_status.json`.
+
+Important limitation: this script owns its own adapter connection. A plain local
+process cannot safely take over an already-running Codex-owned MCP stdio
+session. For the exact current Codex-connected runtime, keep polling through
+Codex or add a small local control API to the external Colab adapter process.
+
+### Local Google Drive Handoff
+
+Qwen teacher labeling is API-bound, so it is usually cleaner to run it locally
+and use Google Drive only as the Colab handoff store. The safest layout is:
+
+- write active shard outputs to local disk
+- mirror completed files into Drive with `rclone copy`
+- train later in Colab from `/content/drive/MyDrive/hippo-qwen-runs/...`
+
+Set up a Google Drive remote once:
+
+```bash
+rclone config
+rclone lsd gdrive:
+```
+
+To stop a Colab API-labeling run and continue locally, use the local runner:
+
+```bash
+scripts/local_qwen_drive_run.sh \
+  --run-name all_12288 \
+  --remote gdrive:hippo-qwen-runs/all_12288 \
+  --workers 3 \
+  --target-complete-shards 256
+```
+
+The runner:
+
+- prompts for the Qwen/DashScope key if `DASHSCOPE_API_KEY` and `QWEN_API_KEY`
+  are unset
+- strips accidental whitespace from the pasted key and validates it with a small
+  Qwen preflight request before launching shard workers
+- launches `rclone config` if the `gdrive:` remote is missing, so you can sign
+  in to Google Drive through the normal OAuth flow
+- copies any existing Drive artifacts down into `runs/all_12288`
+- generates domain episodes locally only if they are missing
+- inspects `qwen_teacher_episodes/episodes_*.jsonl`
+- skips shards with at least `--expected-per-shard` labeled episodes
+- resumes partial shards through the existing Qwen labeler
+- copies the local run folder back to Drive after every worker round
+- converts complete labels into `teacher_scorer` and `teacher_ranked`
+- stops cleanly at `--target-complete-shards` when set, and pushes local
+  artifacts before exiting on interrupt
+
+The default shape matches the broad run:
+
+```text
+episodes=12288
+shard_count=768
+expected_per_shard=16
+domain_set=all
+```
+
+For a lower-level mirror loop, use:
+
+```bash
+python3 scripts/drive_sync_loop.py \
+  --local-dir runs/all_12288 \
+  --remote gdrive:hippo-qwen-runs/all_12288 \
+  --interval-seconds 180
+```
+
+Use the same Google account in Colab, mount Drive there, and the run appears at:
+
+```text
+/content/drive/MyDrive/hippo-qwen-runs/all_12288
+```
+
+If an actual local filesystem mount is needed:
+
+```bash
+mkdir -p ~/mnt/gdrive
+rclone mount gdrive: ~/mnt/gdrive --vfs-cache-mode writes
+```
+
+Prefer the copy loop for active Qwen labeling. A Drive FUSE mount is convenient
+for browsing artifacts, but direct live writes through it can add latency and
+harder-to-debug partial-file behavior.
+
 ## Remaining Work
 
 Before this should be presented as production-ready:

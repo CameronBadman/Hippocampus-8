@@ -7,5 +7,6 @@ __pycache__/
 data/
 reports/
 teacher_runs/
+runs/
 models/*.pt
 models/*.pth
