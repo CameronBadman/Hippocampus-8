@@ -33,6 +33,7 @@ def main() -> None:
     parser.add_argument("--decoys-per-case", type=int, default=8)
     parser.add_argument("--noise-nodes", type=int, default=8192)
     parser.add_argument("--top-k", type=int, default=5)
+    parser.add_argument("--metric-ks", default="1,3,5,10")
     parser.add_argument("--seed-limit", type=int, default=1)
     parser.add_argument("--target-relation-weight", type=float, default=0.35)
     parser.add_argument("--target-noise", type=float, default=0.04)
@@ -48,6 +49,8 @@ def main() -> None:
     parser.add_argument("--json-output", default=None)
     args = parser.parse_args()
     validate_args(args)
+    metric_ks = parse_metric_ks(args.metric_ks, args.top_k)
+    retrieval_limit = max(metric_ks)
 
     build_start = time.perf_counter()
     graph = build_graph(
@@ -70,7 +73,7 @@ def main() -> None:
     hnsw = maybe_build_hnsw(
         matrix=graph.summary_matrix,
         backend=args.backend,
-        top_k=args.top_k,
+        top_k=retrieval_limit,
         ef=args.hnsw_ef,
         ef_construction=args.hnsw_ef_construction,
         m=args.hnsw_m,
@@ -83,9 +86,9 @@ def main() -> None:
         scorer=scorer,
         config=TraversalConfig(
             max_hops=1,
-            fanout=max(args.decoys_per_case + 2, args.top_k),
-            beam_width=max(args.decoys_per_case + 2, args.top_k),
-            max_visited=max(args.decoys_per_case + 2, args.top_k),
+            fanout=max(args.decoys_per_case + 2, retrieval_limit),
+            beam_width=max(args.decoys_per_case + 2, retrieval_limit),
+            max_visited=max(args.decoys_per_case + 2, retrieval_limit),
             include_threshold=0.0,
             expand_threshold=1.0,
         ),
@@ -95,10 +98,12 @@ def main() -> None:
     warmup_case_ids = rng.integers(0, args.cases, size=args.warmup_queries)
     for case_id_value in warmup_case_ids:
         case_id = int(case_id_value)
-        run_exact(graph, graph.queries[case_id], args.top_k)
+        run_exact(graph, graph.queries[case_id], retrieval_limit)
         if hnsw.index is not None:
-            hnsw_search(hnsw.index, args.top_k, graph.queries[case_id])
-        run_hippo(graph, controller, scorer, case_id, args.seed_limit, args.top_k)
+            hnsw_search(hnsw.index, retrieval_limit, graph.queries[case_id])
+        run_hippo(graph, controller, scorer, case_id, args.seed_limit, retrieval_limit)
+        run_attach_summary(graph, case_id, retrieval_limit)
+        run_attach_hippo(graph, scorer, case_id, retrieval_limit)
 
     rows: dict[str, list[dict[str, float]]] = {
         "exact_summary_vector": [],
@@ -106,6 +111,10 @@ def main() -> None:
     }
     if hnsw.index is not None:
         rows["hnsw_summary_vector"] = []
+    attach_rows: dict[str, list[dict[str, float]]] = {
+        "summary_attach": [],
+        "hippo_attach": [],
+    }
 
     query_case_ids = rng.integers(0, args.cases, size=args.queries)
     for case_id_value in query_case_ids:
@@ -114,24 +123,35 @@ def main() -> None:
         target_id = graph.target_ids[case_id]
 
         start = time.perf_counter()
-        exact_ids = run_exact(graph, query, args.top_k)
-        rows["exact_summary_vector"].append(row_for_ids(exact_ids, target_id, args.top_k, elapsed_ms(start)))
+        exact_ids = run_exact(graph, query, retrieval_limit)
+        rows["exact_summary_vector"].append(row_for_ids(exact_ids, target_id, metric_ks, elapsed_ms(start)))
 
         if hnsw.index is not None:
             start = time.perf_counter()
-            hnsw_indices = hnsw_search(hnsw.index, args.top_k, query)
+            hnsw_indices = hnsw_search(hnsw.index, retrieval_limit, query)
             hnsw_ids = [graph.node_ids[index] for index in hnsw_indices]
-            rows["hnsw_summary_vector"].append(row_for_ids(hnsw_ids, target_id, args.top_k, elapsed_ms(start)))
+            rows["hnsw_summary_vector"].append(row_for_ids(hnsw_ids, target_id, metric_ks, elapsed_ms(start)))
 
         start = time.perf_counter()
-        hippo = run_hippo(graph, controller, scorer, case_id, args.seed_limit, args.top_k)
-        hippo_row = row_for_ids(hippo.ids, target_id, args.top_k, elapsed_ms(start))
+        hippo = run_hippo(graph, controller, scorer, case_id, args.seed_limit, retrieval_limit)
+        hippo_row = row_for_ids(hippo.ids, target_id, metric_ks, elapsed_ms(start))
         hippo_row["visited"] = float(hippo.visited)
         hippo_row["included"] = float(hippo.included)
         hippo_row["seed_count"] = float(hippo.seed_count)
         hippo_row["scored_candidates"] = float(hippo.scored_candidates)
         hippo_row["score_batches"] = float(hippo.score_batches)
         rows["hippo_traversal"].append(hippo_row)
+
+        start = time.perf_counter()
+        summary_attach_ids = run_attach_summary(graph, case_id, retrieval_limit)
+        attach_rows["summary_attach"].append(row_for_ids(summary_attach_ids, target_id, metric_ks, elapsed_ms(start)))
+
+        start = time.perf_counter()
+        hippo_attach = run_attach_hippo(graph, scorer, case_id, retrieval_limit)
+        hippo_attach_row = row_for_ids(hippo_attach.ids, target_id, metric_ks, elapsed_ms(start))
+        hippo_attach_row["scored_candidates"] = float(hippo_attach.scored_candidates)
+        hippo_attach_row["score_batches"] = float(hippo_attach.score_batches)
+        attach_rows["hippo_attach"].append(hippo_attach_row)
 
     report: dict[str, Any] = {
         "benchmark": "adversarial_memory",
@@ -148,6 +168,8 @@ def main() -> None:
             "noise_nodes": args.noise_nodes,
             "nodes": len(graph.node_ids),
             "top_k": args.top_k,
+            "metric_ks": list(metric_ks),
+            "retrieval_limit": retrieval_limit,
             "seed_limit": args.seed_limit,
             "target_relation_weight": args.target_relation_weight,
             "target_noise": args.target_noise,
@@ -174,6 +196,7 @@ def main() -> None:
             "hnsw_build_ms": round(hnsw.build_ms, 3),
         },
         "metrics": {name: summarize_rows(method_rows) for name, method_rows in rows.items()},
+        "attach_metrics": {name: summarize_rows(method_rows) for name, method_rows in attach_rows.items()},
     }
 
     rendered = json.dumps(report, indent=2, sort_keys=True)
@@ -189,6 +212,8 @@ class GraphBundle:
     store: GraphStore
     index: TraversalIndex
     queries: list[np.ndarray]
+    attach_new_nodes: list[NodeFrame]
+    attach_candidate_ids: list[list[str]]
     seed_ids: list[str]
     target_ids: list[str]
     node_ids: list[str]
@@ -208,6 +233,13 @@ class HippoOutput:
     visited: int
     included: int
     seed_count: int
+    scored_candidates: int
+    score_batches: int
+
+
+@dataclass(frozen=True)
+class AttachOutput:
+    ids: list[str]
     scored_candidates: int
     score_batches: int
 
@@ -263,7 +295,39 @@ class RelationAwareScorer:
         candidate_node: NodeFrame,
         path_vector: Sequence[float],
     ) -> float:
-        return 0.0
+        return self.score_attach_batch(
+            new_node=new_node,
+            candidate_nodes=(candidate_node,),
+            path_vectors=(path_vector,),
+        )[0]
+
+    def score_attach_batch(
+        self,
+        *,
+        new_node: NodeFrame,
+        candidate_nodes: Sequence[NodeFrame],
+        path_vectors: Sequence[Sequence[float]],
+    ) -> tuple[float, ...]:
+        if len(candidate_nodes) != len(path_vectors):
+            raise ValueError("candidate_nodes and path_vectors must have the same length")
+        if not candidate_nodes:
+            return ()
+
+        self.score_batches += 1
+        self.scored_candidates += len(candidate_nodes)
+        attach_query = new_node.traversal_vector if new_node.traversal_vector is not None else new_node.summary_vector
+        scores: list[float] = []
+        for candidate_node, path_vector in zip(candidate_nodes, path_vectors):
+            candidate_route = (
+                candidate_node.traversal_vector
+                if candidate_node.traversal_vector is not None
+                else candidate_node.summary_vector
+            )
+            route_match = cosine01(attach_query, candidate_route)
+            summary_match = cosine01(new_node.summary_vector, candidate_node.summary_vector)
+            path_match = cosine01(path_vector, candidate_node.summary_vector)
+            scores.append(clamp01(route_match * 0.70 + summary_match * 0.20 + path_match * 0.10))
+        return tuple(scores)
 
     def _score_context(self, query_vector: Sequence[float], context: EdgeScoreContext) -> TraversalScores:
         edge_match = cosine01(query_vector, context.edge.edge_vector)
@@ -306,6 +370,22 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--target-relation-weight must be in [0, 1]")
 
 
+def parse_metric_ks(raw: str, top_k: int) -> tuple[int, ...]:
+    values = {top_k}
+    for part in raw.split(","):
+        cleaned = part.strip()
+        if not cleaned:
+            continue
+        try:
+            value = int(cleaned)
+        except ValueError as exc:
+            raise ValueError(f"--metric-ks values must be integers: {cleaned!r}") from exc
+        if value <= 0:
+            raise ValueError("--metric-ks values must be positive")
+        values.add(value)
+    return tuple(sorted(values))
+
+
 def build_graph(
     *,
     cases: int,
@@ -322,6 +402,8 @@ def build_graph(
     store = GraphStore(max_outgoing_edges=decoys_per_case + 1)
     index = TraversalIndex(config=index_config)
     queries: list[np.ndarray] = []
+    attach_new_nodes: list[NodeFrame] = []
+    attach_candidate_ids: list[list[str]] = []
     seed_ids: list[str] = []
     target_ids: list[str] = []
     node_ids: list[str] = []
@@ -357,10 +439,11 @@ def build_graph(
             full_vector=target_summary,
             summary_payload=f"relationship target for case {case_id}",
             metadata={"case": case_id, "kind": "target"},
-            traversal_vector=unit(target_summary * 0.70 + edge_vector * 0.30),
+            traversal_vector=edge_vector,
         )
         add_node(store, index, seed_node, node_ids, summary_rows)
         add_node(store, index, target_node, node_ids, summary_rows)
+        case_attach_candidate_ids = [target_id]
         store.add_edge(
             EdgeFrame(
                 src_id=seed_id,
@@ -383,6 +466,7 @@ def build_graph(
                 traversal_vector=unit(wrong_relation + rng.normal(scale=0.08, size=16).astype(np.float32)),
             )
             add_node(store, index, decoy_node, node_ids, summary_rows)
+            case_attach_candidate_ids.append(decoy_id)
             store.add_edge(
                 EdgeFrame(
                     src_id=seed_id,
@@ -392,6 +476,17 @@ def build_graph(
                 )
             )
 
+        attach_new_nodes.append(
+            NodeFrame(
+                node_id=f"case_{case_id:05d}_attach_query",
+                summary_vector=query,
+                full_vector=query,
+                summary_payload=f"new node attach query for case {case_id}",
+                metadata={"case": case_id, "kind": "attach_query"},
+                traversal_vector=edge_vector,
+            )
+        )
+        attach_candidate_ids.append(case_attach_candidate_ids)
         queries.append(query)
         seed_ids.append(seed_id)
         target_ids.append(target_id)
@@ -412,6 +507,8 @@ def build_graph(
         store=store,
         index=index,
         queries=queries,
+        attach_new_nodes=attach_new_nodes,
+        attach_candidate_ids=attach_candidate_ids,
         seed_ids=seed_ids,
         target_ids=target_ids,
         node_ids=node_ids,
@@ -509,18 +606,57 @@ def run_hippo(
     )
 
 
-def row_for_ids(ids: Sequence[str], target_id: str, top_k: int, latency_ms: float) -> dict[str, float]:
-    hits = [1 if node_id == target_id else 0 for node_id in ids[:top_k]]
-    hit_count = sum(hits)
+def run_attach_summary(graph: GraphBundle, case_id: int, top_k: int) -> list[str]:
+    new_node = graph.attach_new_nodes[case_id]
+    candidate_ids = graph.attach_candidate_ids[case_id]
+    ranked = sorted(
+        (
+            (candidate_id, cosine01(new_node.summary_vector, graph.store.get_node(candidate_id).summary_vector))
+            for candidate_id in candidate_ids
+        ),
+        key=lambda item: (-item[1], item[0]),
+    )
+    return [candidate_id for candidate_id, _ in ranked[:top_k]]
+
+
+def run_attach_hippo(
+    graph: GraphBundle,
+    scorer: RelationAwareScorer,
+    case_id: int,
+    top_k: int,
+) -> AttachOutput:
+    scorer.reset()
+    new_node = graph.attach_new_nodes[case_id]
+    candidate_ids = graph.attach_candidate_ids[case_id]
+    candidate_nodes = [graph.store.get_node(candidate_id) for candidate_id in candidate_ids]
+    path_vectors = [graph.queries[case_id] for _ in candidate_nodes]
+    scores = scorer.score_attach_batch(
+        new_node=new_node,
+        candidate_nodes=candidate_nodes,
+        path_vectors=path_vectors,
+    )
+    ranked = sorted(zip(candidate_ids, scores), key=lambda item: (-item[1], item[0]))
+    return AttachOutput(
+        ids=[candidate_id for candidate_id, _ in ranked[:top_k]],
+        scored_candidates=scorer.scored_candidates,
+        score_batches=scorer.score_batches,
+    )
+
+
+def row_for_ids(ids: Sequence[str], target_id: str, metric_ks: Sequence[int], latency_ms: float) -> dict[str, float]:
+    max_k = max(metric_ks)
+    hits = [1 if node_id == target_id else 0 for node_id in ids[:max_k]]
     first_hit = next((rank + 1 for rank, hit in enumerate(hits) if hit), 0)
-    return {
+    row = {
         "latency_ms": latency_ms,
-        "precision_at_1": 1.0 if hits[:1] == [1] else 0.0,
-        "precision_at_k": hit_count / top_k,
-        "hit_at_k": 1.0 if hit_count else 0.0,
         "mrr": 1.0 / first_hit if first_hit else 0.0,
-        "returned": float(min(len(ids), top_k)),
+        "returned": float(min(len(ids), max_k)),
     }
+    for k in metric_ks:
+        hit_count = sum(hits[:k])
+        row[f"hit_at_{k}"] = 1.0 if hit_count else 0.0
+        row[f"precision_at_{k}"] = hit_count / k
+    return row
 
 
 def summarize_rows(rows: Sequence[dict[str, float]]) -> dict[str, float]:
