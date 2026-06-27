@@ -260,18 +260,22 @@ queries=500
 decoys_per_case=8
 top_k=5
 seed_limit=1
+target_relation_weight=0.35
+decoy_noise=0.12
 ```
 
 | Method | Precision@1 | Hit@5 | MRR | Mean latency |
 | --- | ---: | ---: | ---: | ---: |
-| Exact summary vector | 0.000 | 0.000 | 0.000 | 1.007 ms |
-| HNSW summary vector | 0.000 | 0.000 | 0.000 | 0.222 ms |
-| Hippo traversal | 1.000 | 1.000 | 1.000 | 1.580 ms |
+| Exact summary vector | 0.676 | 0.968 | 0.7939 | 0.733 ms |
+| HNSW summary vector | 0.676 | 0.968 | 0.7939 | 0.236 ms |
+| Hippo traversal | 1.000 | 1.000 | 1.000 | 1.349 ms |
 
 This is the benchmark shape where Hippo is supposed to win: relation/path-aware
-retrieval under adversarial nearest-vector decoys. It should be read alongside
-the pure vector benchmark above, where HNSW is the right tool and Hippo does not
-win on latency.
+top-1 ranking under adversarial nearest-vector decoys. HNSW still finds the
+target somewhere in the top-5 most of the time, but it misranks the nearest
+summary decoys above the relationship target. Hippo is about 32 percentage
+points better on top-1 here, while HNSW is still much faster for pure vector
+lookup.
 
 Transformer traversal scale benchmark:
 
