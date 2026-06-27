@@ -209,7 +209,9 @@ The comparison reports:
 - `hippo_traversal`: graph walk plus scorer from the indexed seeds
 
 Primary metrics are `precision_at_k`, `hit_at_k`, `mrr`, `latency_ms`, and for
-Hippo traversal also `visited`, `included`, and `seed_count`.
+Hippo traversal also `visited`, `included`, and `seed_count`. Some benchmarks
+report multiple cutoffs, such as `hit_at_1`, `hit_at_3`, `hit_at_5`,
+`hit_at_10`, `precision_at_3`, `precision_at_5`, and `precision_at_10`.
 
 Sample hard 50k comparison from a CPU Colab runtime:
 
@@ -243,9 +245,10 @@ Adversarial relationship-memory benchmark:
   --queries 500 \
   --decoys-per-case 8 \
   --noise-nodes 8192 \
-  --top-k 5 \
+  --top-k 10 \
+  --metric-ks 1,3,5,10 \
   --backend hnsw \
-  --json-output reports/adversarial_memory_4096_hnsw.json
+  --json-output reports/adversarial_memory_4096_hnsw_multik.json
 ```
 
 This benchmark baits summary-vector search with near-query decoys. The correct
@@ -258,17 +261,33 @@ CPU Colab result:
 nodes=49152
 queries=500
 decoys_per_case=8
-top_k=5
+top_k=10
+metric_ks=1,3,5,10
+retrieval_limit=10
 seed_limit=1
 target_relation_weight=0.35
 decoy_noise=0.12
 ```
 
-| Method | Precision@1 | Hit@5 | MRR | Mean latency |
-| --- | ---: | ---: | ---: | ---: |
-| Exact summary vector | 0.676 | 0.968 | 0.7939 | 0.733 ms |
-| HNSW summary vector | 0.676 | 0.968 | 0.7939 | 0.236 ms |
-| Hippo traversal | 1.000 | 1.000 | 1.000 | 1.349 ms |
+Retrieval metrics:
+
+| Method | Precision@1 | Hit@3 | Hit@5 | Hit@10 | MRR | Mean latency |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Exact summary vector | 0.676 | 0.900 | 0.968 | 1.000 | 0.7989 | 1.807 ms |
+| HNSW summary vector | 0.676 | 0.900 | 0.968 | 1.000 | 0.7989 | 0.274 ms |
+| Hippo traversal | 1.000 | 1.000 | 1.000 | 1.000 | 1.0000 | 2.046 ms |
+
+Attach metrics:
+
+| Method | Precision@1 | Hit@3 | Hit@5 | Hit@10 | MRR | Mean latency |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Summary attach | 0.678 | 0.902 | 0.968 | 1.000 | 0.8000 | 0.212 ms |
+| Hippo attach | 1.000 | 1.000 | 1.000 | 1.000 | 1.0000 | 0.556 ms |
+
+The JSON report also includes `precision_at_3`, `precision_at_5`, and
+`precision_at_10`. This benchmark has one correct target per query, so those
+values are effectively `hit_at_k / k`; the tables use `hit_at_k` for the
+higher cutoffs because it is easier to read as success within the returned set.
 
 This is the benchmark shape where Hippo is supposed to win: relation/path-aware
 top-1 ranking under adversarial nearest-vector decoys. HNSW still finds the
