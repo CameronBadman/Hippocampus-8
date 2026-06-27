@@ -34,6 +34,10 @@ def main() -> None:
     parser.add_argument("--noise-nodes", type=int, default=8192)
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--seed-limit", type=int, default=1)
+    parser.add_argument("--target-relation-weight", type=float, default=0.35)
+    parser.add_argument("--target-noise", type=float, default=0.04)
+    parser.add_argument("--decoy-noise", type=float, default=0.12)
+    parser.add_argument("--wrong-edge-noise", type=float, default=0.08)
     parser.add_argument("--index-tables", type=int, default=4)
     parser.add_argument("--index-bits", type=int, default=14)
     parser.add_argument("--backend", choices=["auto", "exact", "hnsw"], default="auto")
@@ -56,6 +60,10 @@ def main() -> None:
             bits_per_table=args.index_bits,
             seed=17,
         ),
+        target_relation_weight=args.target_relation_weight,
+        target_noise=args.target_noise,
+        decoy_noise=args.decoy_noise,
+        wrong_edge_noise=args.wrong_edge_noise,
         seed=args.seed,
     )
     graph_build_ms = elapsed_ms(build_start)
@@ -141,6 +149,10 @@ def main() -> None:
             "nodes": len(graph.node_ids),
             "top_k": args.top_k,
             "seed_limit": args.seed_limit,
+            "target_relation_weight": args.target_relation_weight,
+            "target_noise": args.target_noise,
+            "decoy_noise": args.decoy_noise,
+            "wrong_edge_noise": args.wrong_edge_noise,
             "index_config": {
                 "dimension": graph.index.config.dimension,
                 "table_count": graph.index.config.table_count,
@@ -287,6 +299,11 @@ def validate_args(args: argparse.Namespace) -> None:
             raise ValueError(f"--{field.replace('_', '-')} must be positive")
     if args.warmup_queries < 0 or args.noise_nodes < 0:
         raise ValueError("--warmup-queries and --noise-nodes must be non-negative")
+    for field in ("target_relation_weight", "target_noise", "decoy_noise", "wrong_edge_noise"):
+        if getattr(args, field) < 0.0:
+            raise ValueError(f"--{field.replace('_', '-')} must be non-negative")
+    if args.target_relation_weight > 1.0:
+        raise ValueError("--target-relation-weight must be in [0, 1]")
 
 
 def build_graph(
@@ -295,6 +312,10 @@ def build_graph(
     decoys_per_case: int,
     noise_nodes: int,
     index_config: TraversalIndexConfig,
+    target_relation_weight: float,
+    target_noise: float,
+    decoy_noise: float,
+    wrong_edge_noise: float,
     seed: int,
 ) -> GraphBundle:
     rng = np.random.default_rng(seed)
@@ -313,7 +334,11 @@ def build_graph(
         relation = relation_bank[case_id % len(relation_bank)]
         query = unit(topic * 0.55 + relation * 0.45)
         seed_vector = query
-        target_summary = unit(topic * 0.86 + relation * 0.14 + rng.normal(scale=0.02, size=16).astype(np.float32))
+        target_summary = unit(
+            topic * (1.0 - target_relation_weight)
+            + relation * target_relation_weight
+            + rng.normal(scale=target_noise, size=16).astype(np.float32)
+        )
         edge_vector = unit(topic * 0.20 + relation * 0.80)
 
         seed_id = f"case_{case_id:05d}_seed"
@@ -346,8 +371,8 @@ def build_graph(
         )
 
         for decoy_index in range(decoys_per_case):
-            wrong_relation = unit(-relation + rng.normal(scale=0.08, size=16).astype(np.float32))
-            decoy_summary = unit(query + rng.normal(scale=0.025, size=16).astype(np.float32))
+            wrong_relation = unit(-relation + rng.normal(scale=wrong_edge_noise, size=16).astype(np.float32))
+            decoy_summary = unit(query + rng.normal(scale=decoy_noise, size=16).astype(np.float32))
             decoy_id = f"case_{case_id:05d}_decoy_{decoy_index:02d}"
             decoy_node = NodeFrame(
                 node_id=decoy_id,
