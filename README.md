@@ -211,6 +211,30 @@ The comparison reports:
 Primary metrics are `precision_at_k`, `hit_at_k`, `mrr`, `latency_ms`, and for
 Hippo traversal also `visited`, `included`, and `seed_count`.
 
+Sample hard 50k comparison from a CPU Colab runtime:
+
+```text
+nodes=50000
+queries=100
+clusters=512
+top_k=10
+vector_noise=0.18
+query_noise=0.15
+scorer=HeuristicTraversalScorer
+```
+
+| Method | Precision@10 | Hit@10 | MRR | Mean latency |
+| --- | ---: | ---: | ---: | ---: |
+| Exact vector | 0.874 | 1.000 | 0.9409 | 1.936 ms |
+| HNSW vector | 0.875 | 1.000 | 0.9409 | 0.513 ms |
+| Hippo seed index | 0.556 | 0.930 | 0.8375 | 1.045 ms |
+| Hippo traversal | 0.890 | 0.930 | 0.9083 | 86.993 ms |
+
+This sample is intentionally not a production claim. It shows the comparison
+harness working and gives a useful baseline: HNSW is much faster for pure vector
+top-k lookup, while graph traversal can recover ranking quality from weaker
+seeds but is currently dominated by Python graph/scorer overhead.
+
 Transformer traversal scale benchmark:
 
 ```bash
@@ -317,7 +341,8 @@ should be reproducible from explicit shell commands.
   labels
 - add domain-level or generator-seed-level holdouts
 - benchmark end-to-end retrieval at 10k, 50k, and 100k nodes
-- compare against HNSW with the same query workload and saved JSON reports
+- run the HNSW comparison with the saved transformer checkpoint once Drive/GPU
+  are mounted in Colab
 - improve attach behavior when high recall is required
 - add persistent storage and a stable server API
 - add error-analysis reports for failed traversal and attach cases
