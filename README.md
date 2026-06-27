@@ -1,46 +1,60 @@
 # Hippocampus-8
 
-Deterministic vector-frame graph traversal prototype.
+Deterministic vector-frame graph memory prototype.
 
-This repo explores a memory graph where nodes and edges carry learned vector
-frames. The graph stores dense node information, compact traversal vectors, and
-edge vectors that encode relationship geometry without symbolic `relation_type`
-labels. A small scorer ranks traversal decisions, and the controller applies
-deterministic ordering so identical inputs produce identical output order.
+Hippocampus-8 stores memory as a bounded graph. Nodes carry summary, full,
+metadata, and traversal vectors. Edges carry compact relationship vectors
+instead of symbolic `relation_type` labels. Traversal is deterministic: the
+same graph, query, scorer, and config produce the same visited set and result
+ordering.
 
-## Current Status
+This is an engineer-demo prototype, not production infrastructure yet.
 
-This is an engineer-demo prototype, not a production memory system yet.
+## What Works
 
-What works:
-
-- bounded node/edge graph storage
-- first-class deterministic metadata and traversal vectors
+- bounded node and edge graph storage
+- first-class node metadata vectors and compact traversal vectors
+- edge vectors that implicitly encode relationship geometry
 - deterministic beam and single-path traversal
+- deterministic result ranking via `result_score`
 - expressway nodes for long-range routing
 - compact deterministic seed index over traversal vectors
-- PyTorch scorer backend with a transformer option
-- traversal result ranking via `result_score`
+- PyTorch scorer backend with a small transformer option
+- batch traversal and attach scoring
 - Qwen-teacher synthetic data pipeline
-- benchmark scripts for ranking, hard negatives, calibration, and latency
+- benchmark scripts for ranking, hard negatives, calibration, latency, and
+  HNSW/vector-search comparison
 
-Current best saved run:
+## Latest Saved Run
+
+Current best checkpoint from the broad Qwen-teacher run:
 
 ```text
-/content/drive/MyDrive/hippo-qwen-runs/rich_1536/rich_1536_transformer_result_a100_e128_full.pt
-sha256: 67da16189456c0a347d0c781ae095db39b14d237d614a8ce2101ad6914501d93
+/content/drive/MyDrive/hippo-qwen-runs/all_12288/training_runs/a100_384_e128_20260625_022008/all_12288_384_transformer_a100_e128.pt
+sha256: 8e975ffd270a8a79f4812bf899f98b3da34c345f27c05a6cc50fd35af4e7fcbe
 ```
 
-Exact trainer-holdout results from that run:
+Training data for that run:
 
-| Head | Cases | Top-1 | Avg precision | Precision @ recall 90 | Hard-neg pairwise | ms/case |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Traversal result rank | 230 | 1.0000 | 0.8902 | 0.6036 | 0.9388 | 0.193 |
-| Attach | 230 | 0.9870 | 0.9919 | 0.9912 | 0.9953 | 0.256 |
+```text
+384 labeled shards
+6,144 Qwen-labeled episodes
+98,304 traversal examples
+98,304 attach examples
+6,144 traversal ranking cases
+6,144 attach ranking cases
+```
 
-Honest caveat: these are synthetic/Qwen-teacher benchmarks. The prototype is
-promising, but it still needs real-data evaluation and end-to-end graph-scale
-retrieval tests before production claims.
+Benchmark on the same teacher-ranked distribution:
+
+| Head | Cases | Top-1 | Avg precision | Precision @ recall 90 | ms/case |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Traversal | 6,144 | 1.0000 | 0.99996 | 0.99994 | 0.232 |
+| Attach | 6,144 | 0.9097 | 0.9083 | 0.2819 | 0.255 |
+
+Honest caveat: this proves the student model can imitate the generated teacher
+distribution. It does not yet prove customer-data generalization or production
+retrieval quality at 50k to 100k nodes.
 
 ## Install
 
@@ -49,10 +63,11 @@ python3 -m venv .venv
 .venv/bin/pip install -e .
 ```
 
-Install the optional PyTorch backend:
+Optional extras:
 
 ```bash
 .venv/bin/pip install -e ".[torch]"
+.venv/bin/pip install -e ".[hnsw]"
 ```
 
 Run tests:
@@ -67,26 +82,7 @@ Run the local deterministic demo:
 .venv/bin/python demo.py
 ```
 
-## Core Model
-
-The prototype separates graph state from model scoring:
-
-- `NodeFrame`: summary vector, optional full vector, metadata vector, traversal vector, payload, metadata
-- `EdgeFrame`: compact relationship vector plus confidence
-- `TraversalScores`: `follow`, `read_full`, `include`, `expand`, `stop`, `result`
-- `TraversalController`: deterministic graph walk and result ordering
-- `TraversalIndex`: deterministic compact seed lookup
-- `insert_node`: traverses first, then attaches a new node to ranked candidates
-
-`result_score` is the score used to order returned included nodes. It is
-separate from `follow_score` so the traversal can use bridge nodes without
-ranking those bridge nodes above final answers.
-
-Node metadata is vectorized automatically. Raw metadata stays available as a
-dict, but `metadata_vector` and compact `traversal_vector` are first-class frame
-fields and are used by index lookup and scorer inputs.
-
-## Minimal Example
+## Core API
 
 ```python
 from vector_graph import (
@@ -101,6 +97,7 @@ from vector_graph import (
 from vector_graph.vectors import stable_edge_vector
 
 store = GraphStore(max_outgoing_edges=16)
+
 store.add_node(
     NodeFrame(
         "root",
@@ -131,112 +128,134 @@ controller = TraversalController(
     scorer=HeuristicTraversalScorer(),
     config=TraversalConfig(max_hops=2, fanout=8, beam_width=8),
 )
-result = controller.traverse(query_vector=embed_text("traverse vector frame graph", 32), seed_id="root")
+result = controller.traverse(
+    query_vector=embed_text("traverse vector frame graph", 32),
+    seed_id="root",
+)
 
 print([decision.node_id for decision in result.included])
 ```
 
-## Traversal Modes
+## Design Notes
 
-```python
-TraversalConfig(mode="beam", fanout=16, beam_width=32)
-TraversalConfig(mode="single_path", fanout=32, max_hops=12)
+`NodeFrame`:
+
+- `summary_vector`: compact semantic summary
+- `full_vector`: optional richer detail vector
+- `metadata_vector`: deterministic vectorization of raw metadata
+- `traversal_vector`: compact routing vector, currently 16 dimensions by default
+- `metadata`: raw stable dict for inspection and filtering
+
+`EdgeFrame`:
+
+- `edge_vector`: compact learned relationship frame
+- `confidence`: deterministic pruning and ordering signal
+
+`TraversalScores`:
+
+- `follow`: should traversal move through this edge
+- `read_full`: should the full node be inspected
+- `include`: should the node be included
+- `expand`: should traversal continue from this node
+- `stop`: should this route stop
+- `result`: returned-result rank score
+
+`result_score` is separate from `follow_score` so bridge or expressway nodes can
+be useful for routing without outranking final answers.
+
+## Benchmarking
+
+Scorer benchmark against ranked teacher files:
+
+```bash
+.venv/bin/python scripts/benchmark_scorer.py \
+  --checkpoint models/scorer.pt \
+  --benchmark-dir data/teacher_ranked \
+  --batch-size 4096 \
+  --json-output reports/scorer_benchmark.json
 ```
 
-Expressway nodes keep relationship semantics implicit in vector frames, while
-allowing a larger bounded edge set for long-range routing:
+The scorer benchmark reports top-k ranking, precision/recall curves,
+hard-negative pairwise accuracy, calibration, latency, and per-action traversal
+quality for `follow`, `read_full`, `include`, `expand`, `stop`, and `result`.
 
-```python
-store = GraphStore(max_outgoing_edges=32, max_expressway_edges=128)
-hub = NodeFrame(
-    node_id="topic_hub",
-    summary_vector=summary,
-    metadata={"expressway": True},
-)
+HNSW/vector-search comparison:
+
+```bash
+.venv/bin/python scripts/benchmark_vector_search_comparison.py \
+  --nodes 50000 \
+  --queries 100 \
+  --backend auto \
+  --json-output reports/vector_search_comparison.json
 ```
 
-Deterministic indexed starts use compact traversal vectors:
+With the trained transformer checkpoint in Colab:
 
-```python
-index = TraversalIndex(config=TraversalIndexConfig(dimension=16, seed=17))
-index.add_nodes(store.nodes())
-seed_ids = index.seed_ids(query_traversal_vector, limit=8)
-result = controller.traverse(
-    query_vector=query_vector,
-    seed_id=seed_id,
-    extra_seed_ids=seed_ids,
-)
+```bash
+python scripts/benchmark_vector_search_comparison.py \
+  --nodes 50000 \
+  --queries 100 \
+  --backend hnsw \
+  --checkpoint /content/drive/MyDrive/hippo-qwen-runs/all_12288/training_runs/a100_384_e128_20260625_022008/all_12288_384_transformer_a100_e128.pt \
+  --device cuda \
+  --json-output /content/drive/MyDrive/hippo-qwen-runs/all_12288/reports/vector_search_comparison_50k.json
+```
+
+The comparison reports:
+
+- `exact_vector`: brute-force cosine upper-bound baseline
+- `hnsw_vector`: HNSW cosine retrieval when `hnswlib` is installed
+- `hippo_seed_index`: deterministic compact traversal-vector seed lookup
+- `hippo_traversal`: graph walk plus scorer from the indexed seeds
+
+Primary metrics are `precision_at_k`, `hit_at_k`, `mrr`, `latency_ms`, and for
+Hippo traversal also `visited`, `included`, and `seed_count`.
+
+Transformer traversal scale benchmark:
+
+```bash
+.venv/bin/python scripts/benchmark_indexed_traversal.py \
+  --nodes 50000 \
+  --queries 100 \
+  --checkpoint models/scorer.pt
 ```
 
 ## Data And Training
 
-Generated datasets, Qwen teacher runs, and checkpoints are intentionally not
-tracked. Regenerate them locally or in Colab when needed.
+Generated datasets, teacher runs, reports, and checkpoints are intentionally not
+tracked in git. Use Drive or local `runs/` for artifacts.
 
-Synthetic smoke data:
-
-```bash
-.venv/bin/python scripts/generate_synthetic_training_data.py
-.venv/bin/python scripts/generate_synthetic_ranking_training_data.py
-.venv/bin/python scripts/generate_synthetic_benchmark.py
-```
-
-Qwen-teacher episode path:
-
-```bash
-.venv/bin/python scripts/generate_teacher_graph_episodes.py \
-  --output-dir data/teacher_episodes
-
-.venv/bin/python scripts/label_teacher_episodes_qwen.py \
-  --episodes-dir data/teacher_episodes \
-  --output-dir data/qwen_teacher_episodes
-
-.venv/bin/python scripts/convert_teacher_episodes.py \
-  --episodes-dir data/qwen_teacher_episodes \
-  --output-data-dir data/teacher_scorer \
-  --output-ranking-dir data/teacher_ranked
-```
-
-Domain-diverse Qwen-teacher episode path:
-
-```bash
-.venv/bin/python scripts/generate_domain_teacher_episodes.py \
-  --domain-set all \
-  --episodes 4096 \
-  --candidate-limit 16 \
-  --output-dir data/domain_teacher_episodes
-
-.venv/bin/python scripts/run_qwen_label_shards.py \
-  --episodes-dir data/domain_teacher_episodes \
-  --output-dir data/qwen_domain_teacher_episodes \
-  --shard-count 256 \
-  --expected-per-shard 16 \
-  --request-timeout 60 \
-  --retries 2 \
-  --continue-on-failure
-```
-
-This generator is designed to stress metadata scope: same-domain wrong workflow,
-cross-domain distractors, bridge nodes that should be followed but not included,
-compliance negatives, tenant/entity mismatches, and realistic operational
-phrasing.
-
-For a larger paid teacher run, use the broad/all domain sets instead of only
-raising the episode count on the curated pack:
+Generate broad synthetic teacher episodes:
 
 ```bash
 .venv/bin/python scripts/generate_domain_teacher_episodes.py \
   --domain-set all \
   --episodes 12288 \
   --candidate-limit 16 \
-  --output-dir data/domain_teacher_episodes_all_12288
+  --output-dir data/domain_teacher_episodes
 ```
 
-`curated` contains the original five hand-authored business domains. `broad`
-adds 17 more verticals covering legal, security, insurance, HR, retail,
-education, energy, travel, media, manufacturing, banking, construction,
-telecom, food safety, property management, biotech labs, and nonprofit grants.
-`all` combines both sets.
+Label with Qwen:
+
+```bash
+.venv/bin/python scripts/run_qwen_label_shards.py \
+  --episodes-dir data/domain_teacher_episodes \
+  --output-dir data/qwen_teacher_episodes \
+  --shard-count 768 \
+  --expected-per-shard 16 \
+  --request-timeout 60 \
+  --retries 2 \
+  --continue-on-failure
+```
+
+Convert labels into scorer/ranking data:
+
+```bash
+.venv/bin/python scripts/convert_teacher_episodes.py \
+  --episodes-dir data/qwen_teacher_episodes \
+  --output-data-dir data/teacher_scorer \
+  --output-ranking-dir data/teacher_ranked
+```
 
 Train the transformer scorer:
 
@@ -255,179 +274,50 @@ Train the transformer scorer:
   --output models/scorer.pt
 ```
 
-Benchmark a checkpoint:
+## Local Drive Handoff
 
-```bash
-.venv/bin/python scripts/benchmark_scorer.py \
-  --checkpoint models/scorer.pt \
-  --benchmark-dir data/teacher_ranked \
-  --batch-size 4096 \
-  --json-output reports/benchmark.json
-```
-
-The scorer benchmark reports top-k ranking, precision/recall curves,
-hard-negative pairwise accuracy, calibration (`brier_score`, `ece_10`), scoring
-latency, and per-action traversal quality for `follow`, `read_full`, `include`,
-`expand`, `stop`, and `result` when teacher oracle vectors are present.
-
-Curated domain validation without Qwen-teacher targets:
-
-```bash
-.venv/bin/python scripts/generate_domain_validation.py \
-  --output-dir data/domain_validation_curated
-
-.venv/bin/python scripts/benchmark_scorer.py \
-  --checkpoint models/scorer.pt \
-  --benchmark-dir data/domain_validation_curated \
-  --batch-size 4096 \
-  --json-output reports/domain_validation.json
-```
-
-This pack is hand-authored across SaaS billing, fintech risk, healthcare ops,
-supply chain, and DevOps incident domains. It is still not customer data, but it
-is a stricter validation than the teacher holdout because labels are manually
-assigned and include same-domain hard negatives.
-
-Index plus traversal benchmark:
-
-```bash
-.venv/bin/python scripts/benchmark_indexed_traversal.py \
-  --nodes 50000 \
-  --queries 100 \
-  --checkpoint models/scorer.pt
-```
-
-## Colab Notes
-
-The heavier training path is intended for Colab/GPU. The saved A100 run above
-used Google Drive paths under:
-
-```text
-/content/drive/MyDrive/hippo-qwen-runs/rich_1536
-```
-
-The current repo includes `scripts/colab_train_to_drive.py` for the older
-synthetic path. For serious runs, prefer the explicit commands in the training
-section so the data directory, report path, checkpoint name, commit SHA, and
-split semantics are captured in a manifest.
-
-### Local Colab Keepalive Sidecar
-
-Codex is not required to keep a long Colab job warm. The local sidecar owns a
-Colab adapter session, prints a Colab URL, waits for the browser bridge to
-connect, then periodically adds a tiny heartbeat/status cell, runs it, writes a
-local status JSON file, and deletes the temporary cell.
-
-```bash
-/home/cameron/projects/google-collab-codex-con/.venv/bin/python \
-  scripts/colab_keepalive_sidecar.py \
-  --adapter-repo /home/cameron/projects/google-collab-codex-con \
-  --interval-seconds 180 \
-  --mode both \
-  --cleanup-existing
-```
-
-By default it summarizes these Colab-side status files if they exist:
-
-```text
-/content/qwen_all_12288_background_status.json
-/content/qwen_domain_labeler_background_status.json
-```
-
-Add more files with repeated `--remote-status-path` arguments. The latest local
-sidecar state is written to `.colab_keepalive_status.json`.
-
-Important limitation: this script owns its own adapter connection. A plain local
-process cannot safely take over an already-running Codex-owned MCP stdio
-session. For the exact current Codex-connected runtime, keep polling through
-Codex or add a small local control API to the external Colab adapter process.
-
-### Local Google Drive Handoff
-
-Qwen teacher labeling is API-bound, so it is usually cleaner to run it locally
-and use Google Drive only as the Colab handoff store. The safest layout is:
-
-- write active shard outputs to local disk
-- mirror completed files into Drive with `rclone copy`
-- train later in Colab from `/content/drive/MyDrive/hippo-qwen-runs/...`
-
-Set up a Google Drive remote once:
-
-```bash
-rclone config
-rclone lsd gdrive:
-```
-
-To stop a Colab API-labeling run and continue locally, use the local runner:
+Qwen labeling is API-bound, so it can run locally while training runs in Colab.
+The local runner uses `rclone` to pull existing Drive artifacts, resume only
+incomplete shards, convert labels, and push progress after each worker round.
 
 ```bash
 scripts/local_qwen_drive_run.sh \
   --run-name all_12288 \
   --remote gdrive:hippo-qwen-runs/all_12288 \
-  --workers 3 \
-  --target-complete-shards 256
+  --workers 6 \
+  --target-complete-shards 384
 ```
 
-The runner:
+It prompts for a Qwen/DashScope key if `DASHSCOPE_API_KEY` or `QWEN_API_KEY` is
+not already set.
 
-- prompts for the Qwen/DashScope key if `DASHSCOPE_API_KEY` and `QWEN_API_KEY`
-  are unset
-- strips accidental whitespace from the pasted key and validates it with a small
-  Qwen preflight request before launching shard workers
-- launches `rclone config` if the `gdrive:` remote is missing, so you can sign
-  in to Google Drive through the normal OAuth flow
-- copies any existing Drive artifacts down into `runs/all_12288`
-- generates domain episodes locally only if they are missing
-- inspects `qwen_teacher_episodes/episodes_*.jsonl`
-- skips shards with at least `--expected-per-shard` labeled episodes
-- resumes partial shards through the existing Qwen labeler
-- copies the local run folder back to Drive after every worker round
-- converts complete labels into `teacher_scorer` and `teacher_ranked`
-- stops cleanly at `--target-complete-shards` when set, and pushes local
-  artifacts before exiting on interrupt
+## Colab Workflow
 
-The default shape matches the broad run:
-
-```text
-episodes=12288
-shard_count=768
-expected_per_shard=16
-domain_set=all
-```
-
-For a lower-level mirror loop, use:
+In Colab:
 
 ```bash
-python3 scripts/drive_sync_loop.py \
-  --local-dir runs/all_12288 \
-  --remote gdrive:hippo-qwen-runs/all_12288 \
-  --interval-seconds 180
+git clone https://github.com/CameronBadman/Hippocampus-8.git /content/hippo-qwen-2
+cd /content/hippo-qwen-2
+python -m pip install -e ".[torch,hnsw]"
 ```
 
-Use the same Google account in Colab, mount Drive there, and the run appears at:
+Mount Drive and use artifacts under:
 
 ```text
 /content/drive/MyDrive/hippo-qwen-runs/all_12288
 ```
 
-If an actual local filesystem mount is needed:
-
-```bash
-mkdir -p ~/mnt/gdrive
-rclone mount gdrive: ~/mnt/gdrive --vfs-cache-mode writes
-```
-
-Prefer the copy loop for active Qwen labeling. A Drive FUSE mount is convenient
-for browsing artifacts, but direct live writes through it can add latency and
-harder-to-debug partial-file behavior.
+The helper `scripts/colab_keepalive_sidecar.py` can keep a separate Colab bridge
+warm and delete temporary status cells, but normal training and benchmarks
+should be reproducible from explicit shell commands.
 
 ## Remaining Work
 
-Before this should be presented as production-ready:
-
-- run real-data benchmarks, not only synthetic/Qwen-teacher labels
+- run real-data or customer-style validation, not only synthetic/Qwen-teacher
+  labels
 - add domain-level or generator-seed-level holdouts
 - benchmark end-to-end retrieval at 10k, 50k, and 100k nodes
-- improve traversal precision at high recall
-- make Colab training/report manifest generation a first-class script
+- compare against HNSW with the same query workload and saved JSON reports
+- improve attach behavior when high recall is required
+- add persistent storage and a stable server API
 - add error-analysis reports for failed traversal and attach cases

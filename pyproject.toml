@@ -13,6 +13,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+hnsw = [
+  "hnswlib>=0.8",
+]
 torch = [
   "torch>=2.3",
 ]
