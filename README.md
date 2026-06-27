@@ -235,6 +235,44 @@ harness working and gives a useful baseline: HNSW is much faster for pure vector
 top-k lookup, while graph traversal can recover ranking quality from weaker
 seeds but is currently dominated by Python graph/scorer overhead.
 
+Adversarial relationship-memory benchmark:
+
+```bash
+.venv/bin/python scripts/benchmark_adversarial_memory.py \
+  --cases 4096 \
+  --queries 500 \
+  --decoys-per-case 8 \
+  --noise-nodes 8192 \
+  --top-k 5 \
+  --backend hnsw \
+  --json-output reports/adversarial_memory_4096_hnsw.json
+```
+
+This benchmark baits summary-vector search with near-query decoys. The correct
+answer is not the nearest summary vector; it is the node reached through the
+right traversal seed and edge relationship vector.
+
+CPU Colab result:
+
+```text
+nodes=49152
+queries=500
+decoys_per_case=8
+top_k=5
+seed_limit=1
+```
+
+| Method | Precision@1 | Hit@5 | MRR | Mean latency |
+| --- | ---: | ---: | ---: | ---: |
+| Exact summary vector | 0.000 | 0.000 | 0.000 | 1.007 ms |
+| HNSW summary vector | 0.000 | 0.000 | 0.000 | 0.222 ms |
+| Hippo traversal | 1.000 | 1.000 | 1.000 | 1.580 ms |
+
+This is the benchmark shape where Hippo is supposed to win: relation/path-aware
+retrieval under adversarial nearest-vector decoys. It should be read alongside
+the pure vector benchmark above, where HNSW is the right tool and Hippo does not
+win on latency.
+
 Transformer traversal scale benchmark:
 
 ```bash
@@ -341,8 +379,8 @@ should be reproducible from explicit shell commands.
   labels
 - add domain-level or generator-seed-level holdouts
 - benchmark end-to-end retrieval at 10k, 50k, and 100k nodes
-- run the HNSW comparison with the saved transformer checkpoint once Drive/GPU
-  are mounted in Colab
+- run vector and adversarial-memory comparisons with the saved transformer
+  checkpoint once Drive/GPU are mounted in Colab
 - improve attach behavior when high recall is required
 - add persistent storage and a stable server API
 - add error-analysis reports for failed traversal and attach cases
