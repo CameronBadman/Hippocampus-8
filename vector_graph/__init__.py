@@ -1,4 +1,4 @@
-from .frames import EdgeFrame, NodeFrame, TraversalDecision, TraversalResult
+from .frames import EdgeFrame, EdgeScoreContext, NodeFrame, TraversalDecision, TraversalResult
 from .index import TraversalIndex, TraversalIndexConfig, TraversalIndexHit
 from .insertion import InsertConfig, insert_node
 from .scorer import HeuristicTraversalScorer
@@ -8,6 +8,7 @@ from .vectors import canonical_metadata_text, embed_text, metadata_vector_from, 
 
 __all__ = [
     "EdgeFrame",
+    "EdgeScoreContext",
     "GraphStore",
     "HeuristicTraversalScorer",
     "InsertConfig",

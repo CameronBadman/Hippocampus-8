@@ -12,7 +12,7 @@ except ImportError as exc:  # pragma: no cover - exercised only without torch in
         "vector_graph.torch_models requires PyTorch. Install the 'torch' extra or run in Colab."
     ) from exc
 
-from .frames import EdgeFrame, NodeFrame, TraversalScores
+from .frames import EdgeFrame, EdgeScoreContext, NodeFrame, TraversalScores
 from .scorer import TraversalScorer, effective_node_summary
 from .vectors import resize_vector
 
@@ -391,20 +391,38 @@ class TorchTraversalScorer(TraversalScorer):
             raise ValueError("edges and dst_nodes must have the same length")
         if not edges:
             return ()
+        contexts = tuple(
+            EdgeScoreContext(
+                current_node=current_node,
+                edge=edge,
+                dst_node=dst_node,
+                path_vector=tuple(float(value) for value in path_vector),
+                hop=hop,
+            )
+            for edge, dst_node in zip(edges, dst_nodes)
+        )
+        return self.score_edge_contexts(query_vector=query_vector, contexts=contexts)
+
+    def score_edge_contexts(
+        self,
+        *,
+        query_vector: Sequence[float],
+        contexts: Sequence[EdgeScoreContext],
+    ) -> tuple[TraversalScores, ...]:
+        if not contexts:
+            return ()
 
         rows = []
         query = resize_vector(query_vector, self.config.query_dim)
-        current_summary = resize_vector(effective_node_summary(current_node), self.config.summary_dim)
-        path = resize_vector(path_vector, self.config.path_dim)
-        for edge, dst_node in zip(edges, dst_nodes):
+        for context in contexts:
             rows.append(
                 [
                     query,
-                    current_summary,
-                    resize_vector(edge.edge_vector, self.config.edge_dim),
-                    resize_vector(effective_node_summary(dst_node), self.config.summary_dim),
-                    path,
-                    traversal_scalars(edge.confidence, hop, self.config.scalar_dim),
+                    resize_vector(effective_node_summary(context.current_node), self.config.summary_dim),
+                    resize_vector(context.edge.edge_vector, self.config.edge_dim),
+                    resize_vector(effective_node_summary(context.dst_node), self.config.summary_dim),
+                    resize_vector(context.path_vector, self.config.path_dim),
+                    traversal_scalars(context.edge.confidence, context.hop, self.config.scalar_dim),
                 ]
             )
 

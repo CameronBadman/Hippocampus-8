@@ -84,6 +84,15 @@ class TraversalScores:
 
 
 @dataclass(frozen=True)
+class EdgeScoreContext:
+    current_node: NodeFrame
+    edge: EdgeFrame
+    dst_node: NodeFrame
+    path_vector: tuple[float, ...]
+    hop: int
+
+
+@dataclass(frozen=True)
 class TraversalDecision:
     node_id: str
     parent_id: str | None

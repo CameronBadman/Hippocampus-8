@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Sequence, cast
 
-from .frames import EdgeFrame, NodeFrame, TraversalDecision, TraversalResult, TraversalScores
+from .frames import EdgeFrame, EdgeScoreContext, NodeFrame, TraversalDecision, TraversalResult, TraversalScores
 from .scorer import TraversalScorer, path_vector_for
 from .store import GraphStore
 
@@ -76,38 +76,54 @@ class TraversalController:
                 break
 
             candidates: list[tuple[float, float, str, TraversalDecision, int]] = []
+            candidate_groups: list[tuple[tuple[str, ...], int, int, list[EdgeScoreContext]]] = []
+            pending_contexts: list[EdgeScoreContext] = []
+            pending_candidate_count = 0
             for current_id, path, expressway_jumps in sorted(frontier, key=lambda item: item[0]):
                 current_node = self.store.get_node(current_id)
                 path_nodes = [self.store.get_node(node_id) for node_id in path]
-                path_vector = path_vector_for(path_nodes, len(seed_node.summary_vector))
+                path_vector = tuple(float(value) for value in path_vector_for(path_nodes, len(seed_node.summary_vector)))
                 current_is_expressway = self.store.is_expressway(current_id)
                 local_fanout = self.config.expressway_fanout if current_is_expressway else self.config.fanout
-                node_candidates: list[tuple[float, float, str, TraversalDecision, int]] = []
-                edge_batch: list[EdgeFrame] = []
-                dst_batch: list[NodeFrame] = []
+                group_contexts: list[EdgeScoreContext] = []
 
                 for edge in self.store.get_edges(current_id):
-                    if len(decisions) + len(candidates) + len(node_candidates) >= self.config.max_visited:
+                    if len(decisions) + pending_candidate_count + len(group_contexts) >= self.config.max_visited:
                         break
                     if edge.dst_id in seen:
                         continue
-                    if len(edge_batch) >= local_fanout:
+                    if len(group_contexts) >= local_fanout:
                         break
 
                     dst_node = self.store.get_node(edge.dst_id)
-                    edge_batch.append(edge)
-                    dst_batch.append(dst_node)
+                    group_contexts.append(
+                        EdgeScoreContext(
+                            current_node=current_node,
+                            edge=edge,
+                            dst_node=dst_node,
+                            path_vector=path_vector,
+                            hop=hop,
+                        )
+                    )
 
-                scores_batch = self._score_edge_batch(
-                    query_vector=query_vector,
-                    current_node=current_node,
-                    edges=edge_batch,
-                    dst_nodes=dst_batch,
-                    path_vector=path_vector,
-                    hop=hop,
-                )
+                candidate_groups.append((path, expressway_jumps, local_fanout, group_contexts))
+                pending_contexts.extend(group_contexts)
+                pending_candidate_count += len(group_contexts)
 
-                for edge, dst_node, scores in zip(edge_batch, dst_batch, scores_batch):
+            scores_by_context = self._score_frontier_contexts(
+                query_vector=query_vector,
+                candidate_groups=candidate_groups,
+                contexts=pending_contexts,
+            )
+            score_index = 0
+
+            for path, expressway_jumps, local_fanout, group_contexts in candidate_groups:
+                node_candidates: list[tuple[float, float, str, TraversalDecision, int]] = []
+                for context in group_contexts:
+                    scores = scores_by_context[score_index]
+                    score_index += 1
+                    edge = context.edge
+                    dst_node = context.dst_node
                     dst_is_expressway = self.store.is_expressway(edge.dst_id)
                     next_expressway_jumps = expressway_jumps + (1 if dst_is_expressway else 0)
                     can_use_expressway = (
@@ -190,6 +206,39 @@ class TraversalController:
         )
         rejected = tuple(decision for decision in visited if not decision.included)
         return TraversalResult(seed_id=seed_id, included=included, rejected=rejected, visited=visited)
+
+    def _score_frontier_contexts(
+        self,
+        *,
+        query_vector: Sequence[float],
+        candidate_groups: Sequence[tuple[tuple[str, ...], int, int, Sequence[EdgeScoreContext]]],
+        contexts: Sequence[EdgeScoreContext],
+    ) -> tuple[TraversalScores, ...]:
+        score_edge_contexts = getattr(self.scorer, "score_edge_contexts", None)
+        if score_edge_contexts is not None:
+            return tuple(
+                cast(Callable[..., Sequence[TraversalScores]], score_edge_contexts)(
+                    query_vector=query_vector,
+                    contexts=contexts,
+                )
+            )
+
+        scores: list[TraversalScores] = []
+        for _, _, _, group_contexts in candidate_groups:
+            if not group_contexts:
+                continue
+            first = group_contexts[0]
+            scores.extend(
+                self._score_edge_batch(
+                    query_vector=query_vector,
+                    current_node=first.current_node,
+                    edges=[context.edge for context in group_contexts],
+                    dst_nodes=[context.dst_node for context in group_contexts],
+                    path_vector=first.path_vector,
+                    hop=first.hop,
+                )
+            )
+        return tuple(scores)
 
     def _score_edge_batch(
         self,

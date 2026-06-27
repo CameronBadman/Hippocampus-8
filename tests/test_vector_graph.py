@@ -17,7 +17,7 @@ from vector_graph import (
     insert_node,
     metadata_vector_from,
 )
-from vector_graph.frames import TraversalScores
+from vector_graph.frames import EdgeScoreContext, TraversalScores
 from vector_graph.vectors import stable_edge_vector
 
 
@@ -104,6 +104,48 @@ class BatchAttachScorer(FixedTraversalScorer):
     ) -> tuple[float, ...]:
         self.attach_batches += 1
         return tuple(0.9 for _ in candidate_nodes)
+
+
+class ContextBatchScorer(FixedTraversalScorer):
+    def __init__(self, scores: dict[str, TraversalScores]) -> None:
+        super().__init__(scores)
+        self.context_batches: list[int] = []
+        self.edge_calls = 0
+
+    def score_edge(
+        self,
+        *,
+        query_vector: Sequence[float],
+        current_node: NodeFrame,
+        edge: EdgeFrame,
+        dst_node: NodeFrame,
+        path_vector: Sequence[float],
+        hop: int,
+    ) -> TraversalScores:
+        self.edge_calls += 1
+        return super().score_edge(
+            query_vector=query_vector,
+            current_node=current_node,
+            edge=edge,
+            dst_node=dst_node,
+            path_vector=path_vector,
+            hop=hop,
+        )
+
+    def score_edge_contexts(
+        self,
+        *,
+        query_vector: Sequence[float],
+        contexts: Sequence[EdgeScoreContext],
+    ) -> tuple[TraversalScores, ...]:
+        self.context_batches.append(len(contexts))
+        return tuple(
+            self.scores.get(
+                context.edge.dst_id,
+                TraversalScores(0.1, 0.1, 0.1, 0.0, 1.0),
+            )
+            for context in contexts
+        )
 
 
 class VectorGraphTests(unittest.TestCase):
@@ -536,6 +578,40 @@ class VectorGraphTests(unittest.TestCase):
         )
 
         self.assertEqual([decision.node_id for decision in result.visited], ["target"])
+
+    def test_traversal_batches_frontier_contexts_when_available(self) -> None:
+        store = GraphStore(max_outgoing_edges=2)
+        for frame in [
+            node("root", "root"),
+            node("left", "left route"),
+            node("right", "right route"),
+            node("left_leaf", "left answer"),
+            node("right_leaf", "right answer"),
+        ]:
+            store.add_node(frame)
+        edge(store, "root", "left", 0.90)
+        edge(store, "root", "right", 0.90)
+        edge(store, "left", "left_leaf", 0.90)
+        edge(store, "right", "right_leaf", 0.90)
+        scorer = ContextBatchScorer(
+            {
+                "left": TraversalScores(0.9, 0.2, 0.7, 0.8, 0.1),
+                "right": TraversalScores(0.9, 0.2, 0.7, 0.8, 0.1),
+                "left_leaf": TraversalScores(0.8, 0.2, 0.7, 0.0, 0.1),
+                "right_leaf": TraversalScores(0.8, 0.2, 0.7, 0.0, 0.1),
+            }
+        )
+        controller = TraversalController(
+            store=store,
+            scorer=scorer,
+            config=TraversalConfig(max_hops=2, fanout=2, beam_width=2, include_threshold=0.0, expand_threshold=0.5),
+        )
+
+        result = controller.traverse(query_vector=embed_text("answer", 32), seed_id="root")
+
+        self.assertEqual(scorer.edge_calls, 0)
+        self.assertEqual(scorer.context_batches, [2, 2])
+        self.assertEqual({decision.node_id for decision in result.visited}, {"left", "right", "left_leaf", "right_leaf"})
 
 
 if __name__ == "__main__":
