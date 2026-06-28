@@ -2,21 +2,22 @@
 
 Relationship-aware memory for AI agents.
 
-Hippocampus-8 is an experimental memory engine that stores memories as a
-bounded graph of vector frames. Nodes store memory content and metadata. Edges
-store compact relationship vectors, so an agent can retrieve by context and
-relationship instead of only nearest-vector similarity.
+Hippocampus-8 is an experimental memory engine for realistic agent memory
+environments where nearest-vector search starts to fall apart. It stores
+memories as a bounded graph of vector frames. Nodes store memory content and
+metadata. Edges store compact relationship vectors, so an agent can retrieve by
+context and relationship instead of only nearest-vector similarity.
 
 The goal is simple: make agent memory more deterministic, more inspectable, and
 better at following the right context.
 
 ## Why It Matters
 
-Standard vector search is good at finding things that look similar. That breaks
-down when two memories are semantically close but only one has the right role in
-the current situation. Hippocampus-8 adds relationship vectors and deterministic
-graph traversal so the memory system can ask: "Which memory is connected in the
-right way?"
+Exact vector search is good at finding the closest embedding. In more realistic
+agent memory, that is often not enough: memories overlap, topics repeat, and the
+right answer depends on role, path, and context. Hippocampus-8 adds relationship
+vectors and deterministic graph traversal so the memory system can ask: "Which
+memory is connected in the right way?"
 
 ## What Works
 
@@ -51,8 +52,10 @@ Adversarial relationship-retrieval benchmark:
 | HNSW summary-vector search | 0.676 |
 | Hippo relationship traversal | 1.000 |
 
-This benchmark baits nearest-vector search with semantically close decoys. Hippo
-wins by following the relationship path, not only the closest summary vector.
+This benchmark models the failure mode Hippo is built for: semantically close
+decoys where exact nearest-vector search can still rank the wrong memory first.
+Hippo wins by following the relationship path, not only the closest summary
+vector.
 
 These are synthetic benchmarks. They show the architecture is working, but they
 are not yet production or customer-data claims.
