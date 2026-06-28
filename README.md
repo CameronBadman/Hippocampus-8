@@ -44,19 +44,24 @@ embedding similarity.
 The current benchmark results are synthetic and teacher-generated. They are
 useful engineering evidence, not production or customer-data claims.
 
-### Attach Holdout
+### Rich 1536 Exact Holdout
 
-Source artifact: `rich_1536/reports/benchmark_result_model_exact_holdout.json`
+Source artifacts:
 
-| Metric | Result |
-| --- | ---: |
-| Attach top-1 accuracy | 0.9870 |
-| Attach precision at 90% recall | 0.9912 |
-| Attach hard-negative pairwise accuracy | 0.9953 |
-| Cases | 230 |
+- `rich_1536/reports/benchmark_result_model_exact_holdout.json`
+- `rich_1536/reports/benchmark_metadata_model_exact_holdout.json`
 
-This measures whether a new memory is attached to the correct existing context
-on a synthetic Qwen-teacher holdout.
+| Model | Head | Cases | Top-1 | Avg precision | Precision @ 90% recall | Hard-neg pairwise | MRR |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Result model | Attach | 230 | 0.9870 | 0.9919 | 0.9912 | 0.9953 | 0.9935 |
+| Result model | Traversal | 230 | 1.0000 | 0.8902 | 0.6036 | 0.9388 | 1.0000 |
+| Metadata model | Attach | 230 | 1.0000 | 0.9975 | 0.9943 | 0.9987 | 1.0000 |
+| Metadata model | Traversal | 230 | 1.0000 | 0.9919 | 0.9798 | 0.9955 | 1.0000 |
+
+The attach head measures whether a new memory links to the correct existing
+context. The traversal head measures whether the graph walk ranks the right
+candidate during retrieval. The metadata model includes first-class metadata
+vectors and is the stronger result on this holdout.
 
 ### Adversarial Relationship Retrieval
 
