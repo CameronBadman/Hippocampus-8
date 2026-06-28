@@ -1,41 +1,52 @@
 # Hippocampus-8
 
-Relationship-aware memory for AI agents.
+Deterministic, relationship-aware memory for AI agents.
 
-Hippocampus-8 is an experimental memory engine that stores memories as a
-bounded graph of vector frames. Nodes store memory content and metadata. Edges
-store compact relationship vectors, so an agent can retrieve by context and
-relationship instead of only nearest-vector similarity.
+Hippocampus-8 is a prototype memory engine that stores memories as a bounded
+graph of vector frames. Nodes hold memory content, metadata, summary vectors,
+full vectors, and compact traversal vectors. Edges hold compact relationship
+vectors, allowing retrieval to depend on how memories are connected instead of
+only how close their embeddings are.
 
-The goal is simple: make agent memory more deterministic, more inspectable, and
-better at following the right context.
+The project is built around a simple goal: make agent memory more deterministic,
+inspectable, and reliable when context depends on relationships between facts.
 
-## Why It Matters
+## Why It Exists
 
-Exact vector search is good at finding the closest embedding. In more realistic
-agent memory, that is often not enough: memories overlap, topics repeat, and the
-right answer depends on role, path, and context. Hippocampus-8 adds relationship
-vectors and deterministic graph traversal so the memory system can ask: "Which
-memory is connected in the right way?"
+Nearest-vector search is useful, but agent memory often has harder retrieval
+conditions:
 
-## What Works
+- many memories share vocabulary or topic structure
+- multiple memories are semantically close to the query
+- the correct answer depends on role, workflow, or relationship path
+- repeated agent interactions create near-duplicate context
 
-- deterministic node and edge graph storage
-- first-class metadata, summary, full, and traversal vectors
-- compact edge vectors that encode relationships without `relation_type` labels
-- deterministic beam and single-path traversal
-- deterministic result ranking through `result_score`
-- compact traversal-vector seed index
-- expressway nodes for long-range routing
-- batched traversal and attach scoring
-- PyTorch scorer backend with a small transformer option
-- Qwen-teacher synthetic data pipeline and benchmark scripts
+Hippocampus-8 adds a deterministic graph traversal layer on top of vector
+representations. The system can rank memories by relationship context, not only
+embedding similarity.
 
-## Current Results
+## Core Design
 
-Source artifact: `rich_1536/reports/benchmark_result_model_exact_holdout.json`.
+- **Node vector frames** for summary, full, metadata, and traversal information
+- **Edge vector frames** that encode relationships without symbolic
+  `relation_type` labels
+- **Deterministic traversal** with bounded fanout, beam search, and single-path
+  modes
+- **Result ranking** through a dedicated `result_score`
+- **Compact seed indexing** over traversal vectors
+- **Expressway nodes** for long-range routing
+- **Batch scoring** for traversal and attach decisions
+- **PyTorch scorer backend** with a small transformer option
+- **Synthetic teacher pipeline** for Qwen-labeled training and evaluation data
 
-Synthetic Qwen-teacher exact holdout:
+## Current Evidence
+
+The current benchmark results are synthetic and teacher-generated. They are
+useful engineering evidence, not production or customer-data claims.
+
+### Attach Holdout
+
+Source artifact: `rich_1536/reports/benchmark_result_model_exact_holdout.json`
 
 | Metric | Result |
 | --- | ---: |
@@ -44,23 +55,24 @@ Synthetic Qwen-teacher exact holdout:
 | Attach hard-negative pairwise accuracy | 0.9953 |
 | Cases | 230 |
 
-Adversarial relationship-retrieval benchmark:
+This measures whether a new memory is attached to the correct existing context
+on a synthetic Qwen-teacher holdout.
+
+### Adversarial Relationship Retrieval
+
+This benchmark is intentionally adversarial. It creates a more realistic memory
+failure mode than clean nearest-neighbor lookup: many candidate memories are
+semantically close, share vocabulary, and look plausible, but only one is
+connected through the correct relationship path.
 
 | Method | Top-1 |
 | --- | ---: |
 | HNSW summary-vector search | 0.676 |
 | Hippo relationship traversal | 1.000 |
 
-This benchmark is intentionally adversarial. It is meant to be closer to messy
-agent memory than a clean vector-search test: many memories are semantically
-close, share vocabulary, and look like plausible answers, but only one is
-connected through the right relationship path. That is where exact summary-vector
-search can start to fall apart: it may find a close embedding and still rank the
-wrong memory first. Hippo wins by following the relationship path, not only the
-closest summary vector.
-
-These are synthetic benchmarks. They show the architecture is working, but they
-are not yet production or customer-data claims.
+The result shows the intended advantage of the graph design: when summary-vector
+similarity ranks plausible decoys too highly, relationship traversal can recover
+the correct memory.
 
 ## Quick Start
 
@@ -81,15 +93,19 @@ Optional extras:
 ## Minimal API
 
 ```python
-from vector_graph import GraphStore, NodeFrame, EdgeFrame
-from vector_graph import TraversalConfig, TraversalController
-from vector_graph import HeuristicTraversalScorer, embed_text
+from vector_graph import EdgeFrame, GraphStore, NodeFrame
+from vector_graph import HeuristicTraversalScorer, TraversalConfig
+from vector_graph import TraversalController, embed_text
 from vector_graph.vectors import stable_edge_vector
 
 store = GraphStore(max_outgoing_edges=16)
 
-store.add_node(NodeFrame("root", summary_vector=embed_text("project memory", 32)))
-store.add_node(NodeFrame("answer", summary_vector=embed_text("relationship traversal", 32)))
+store.add_node(
+    NodeFrame("root", summary_vector=embed_text("project memory", 32))
+)
+store.add_node(
+    NodeFrame("answer", summary_vector=embed_text("relationship traversal", 32))
+)
 
 root = store.get_node("root")
 answer = store.get_node("answer")
@@ -118,12 +134,15 @@ print([decision.node_id for decision in result.included])
 
 ## Status
 
-This is an engineer-demo prototype, not production infrastructure yet.
+Hippocampus-8 is an engineer-demo prototype. The graph engine, deterministic
+traversal, metadata vectorization, synthetic data pipeline, and benchmark scripts
+are implemented. The next phase is validation on more realistic workloads and a
+stable service layer.
 
-Next work:
+Planned work:
 
 - real-data or customer-style validation
-- domain-level holdouts
+- stronger domain-level holdouts
 - end-to-end 10k, 50k, and 100k node benchmarks
 - persistent storage
 - stable server API
