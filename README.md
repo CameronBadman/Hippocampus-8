@@ -1,16 +1,53 @@
 # Hippocampus-8
 
-Deterministic vector-frame graph memory prototype.
+Relationship-aware memory for AI agents.
 
-Hippocampus-8 stores memory as a bounded graph. Nodes carry summary, full,
-metadata, and traversal vectors. Edges carry compact relationship vectors
-instead of symbolic `relation_type` labels. Traversal is deterministic: the
-same graph, query, scorer, and config produce the same visited set and result
-ordering.
+Hippocampus-8 is an experimental memory engine for agents that need stable,
+inspectable long-term memory. Standard vector search is good at finding memories
+that look similar. Hippocampus-8 also stores the relationship between memories,
+so an agent can follow context instead of only chasing nearest neighbors.
 
-This is an engineer-demo prototype, not production infrastructure yet.
+The core design is a bounded graph of vector frames:
 
-## What Works
+- nodes carry summary, full, metadata, and traversal vectors
+- edges carry compact relationship vectors instead of symbolic `relation_type`
+  labels
+- traversal is deterministic: the same graph, query, scorer, and config produce
+  the same visited set and result ordering
+
+Current status: working open-source prototype, ready for engineer demo and
+customer-style validation.
+
+## Why This Is Different
+
+- relationship-aware retrieval, not only similarity search
+- deterministic output ordering for repeatable agent behavior
+- bounded node and edge fanout for predictable latency
+- first-class metadata vectorization for zero-shot-style filtering and routing
+- compact traversal vectors for fast seed lookup
+- trainable PyTorch scorer with small transformer support
+- Qwen-teacher data pipeline for synthetic supervision
+
+## Current Evidence
+
+Hippocampus-8 is already functional at prototype scale. The strongest current
+signal is not that it replaces vector search everywhere; it is that relation
+vectors can recover the right memory when summary similarity alone is
+misleading.
+
+| Capability | Current result |
+| --- | --- |
+| Relationship-stress retrieval | At 49,152 synthetic nodes, Hippo traversal ranked the correct relationship target first in every sampled query. HNSW summary search ranked it first 67.6% of the time in the same setup. |
+| Attach ranking | In the same relationship-stress benchmark, Hippo attach ranked the correct context first in every sampled query. Summary-only attach ranked it first 67.8% of the time. |
+| Teacher-distilled traversal | On 6,144 Qwen-teacher ranking cases, the saved transformer traversal head reached 1.0000 top-1 and 0.99994 precision at 90% recall. |
+| Teacher-distilled attach | On the same generated distribution, the attach head reached 0.9097 top-1. High-recall attach ranking still needs work. |
+| Determinism | Traversal and result ordering are deterministic for a fixed graph, query, scorer, and config. |
+
+These are synthetic and teacher-generated benchmarks, not production claims. They
+are useful because they show the core architecture working and give concrete
+targets for the next validation phase.
+
+## What Works Today
 
 - bounded node and edge graph storage
 - first-class node metadata vectors and compact traversal vectors
@@ -24,6 +61,21 @@ This is an engineer-demo prototype, not production infrastructure yet.
 - Qwen-teacher synthetic data pipeline
 - benchmark scripts for ranking, hard negatives, calibration, latency, and
   HNSW/vector-search comparison
+
+## Validation Status
+
+The current benchmark suite is strongest as engineering evidence:
+
+- the graph engine runs
+- traversal is deterministic
+- relation vectors can beat summary-only retrieval on adversarial synthetic
+  cases
+- the transformer can imitate the generated teacher distribution
+
+The current benchmark suite is not yet enough for production claims. The next
+validation step is real-data or customer-style evaluation, domain-level
+holdouts, and end-to-end runs using the saved transformer checkpoint at 10k,
+50k, and 100k nodes.
 
 ## Latest Saved Run
 
@@ -52,9 +104,9 @@ Benchmark on the same teacher-ranked distribution:
 | Traversal | 6,144 | 1.0000 | 0.99996 | 0.99994 | 0.232 |
 | Attach | 6,144 | 0.9097 | 0.9083 | 0.2819 | 0.255 |
 
-Honest caveat: this proves the student model can imitate the generated teacher
-distribution. It does not yet prove customer-data generalization or production
-retrieval quality at 50k to 100k nodes.
+This run shows that the student model can imitate the generated teacher
+distribution. Customer-data generalization and production retrieval quality are
+the next validation targets.
 
 ## Install
 
