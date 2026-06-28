@@ -40,7 +40,7 @@ misleading.
 | Relationship-stress retrieval | At 49,152 synthetic nodes, Hippo traversal ranked the correct relationship target first in every sampled query. HNSW summary search ranked it first 67.6% of the time in the same setup. |
 | Attach ranking | In the same relationship-stress benchmark, Hippo attach ranked the correct context first in every sampled query. Summary-only attach ranked it first 67.8% of the time. |
 | Teacher-distilled traversal | On 6,144 Qwen-teacher ranking cases, the saved transformer traversal head reached 1.0000 top-1 and 0.99994 precision at 90% recall. |
-| Teacher-distilled attach | On the same generated distribution, the attach head reached 0.9097 top-1. High-recall attach ranking still needs work. |
+| Teacher-distilled attach | On the current synthetic Qwen-teacher holdout, the attach head reached 0.9870 top-1, 0.9912 precision at 90% recall, and 0.9953 hard-negative pairwise accuracy across 230 cases. |
 | Determinism | Traversal and result ordering are deterministic for a fixed graph, query, scorer, and config. |
 
 These are synthetic and teacher-generated benchmarks, not production claims. They
@@ -97,16 +97,17 @@ Training data for that run:
 6,144 attach ranking cases
 ```
 
-Benchmark on the same teacher-ranked distribution:
+Benchmark snapshots:
 
-| Head | Cases | Top-1 | Avg precision | Precision @ recall 90 | ms/case |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Traversal | 6,144 | 1.0000 | 0.99996 | 0.99994 | 0.232 |
-| Attach | 6,144 | 0.9097 | 0.9083 | 0.2819 | 0.255 |
+| Head | Cases | Top-1 | Avg precision | Precision @ recall 90 | Hard-neg pairwise | ms/case |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Traversal teacher-ranked | 6,144 | 1.0000 | 0.99996 | 0.99994 | n/a | 0.232 |
+| Attach holdout | 230 | 0.9870 | n/a | 0.9912 | 0.9953 | n/a |
 
-This run shows that the student model can imitate the generated teacher
-distribution. Customer-data generalization and production retrieval quality are
-the next validation targets.
+These runs show that the student model can imitate generated teacher behavior
+and rank attach candidates strongly on the current synthetic holdout.
+Customer-data generalization and production retrieval quality are the next
+validation targets.
 
 ## Install
 
