@@ -2,118 +2,68 @@
 
 Relationship-aware memory for AI agents.
 
-Hippocampus-8 is an experimental memory engine for agents that need stable,
-inspectable long-term memory. Standard vector search is good at finding memories
-that look similar. Hippocampus-8 also stores the relationship between memories,
-so an agent can follow context instead of only chasing nearest neighbors.
+Hippocampus-8 is an experimental memory engine that stores memories as a
+bounded graph of vector frames. Nodes store memory content and metadata. Edges
+store compact relationship vectors, so an agent can retrieve by context and
+relationship instead of only nearest-vector similarity.
 
-The core design is a bounded graph of vector frames:
+The goal is simple: make agent memory more deterministic, more inspectable, and
+better at following the right context.
 
-- nodes carry summary, full, metadata, and traversal vectors
-- edges carry compact relationship vectors instead of symbolic `relation_type`
-  labels
-- traversal is deterministic: the same graph, query, scorer, and config produce
-  the same visited set and result ordering
+## Why It Matters
 
-Current status: working open-source prototype, ready for engineer demo and
-customer-style validation.
+Standard vector search is good at finding things that look similar. That breaks
+down when two memories are semantically close but only one has the right role in
+the current situation. Hippocampus-8 adds relationship vectors and deterministic
+graph traversal so the memory system can ask: "Which memory is connected in the
+right way?"
 
-## Why This Is Different
+## What Works
 
-- relationship-aware retrieval, not only similarity search
-- deterministic output ordering for repeatable agent behavior
-- bounded node and edge fanout for predictable latency
-- first-class metadata vectorization for zero-shot-style filtering and routing
-- compact traversal vectors for fast seed lookup
-- trainable PyTorch scorer with small transformer support
-- Qwen-teacher data pipeline for synthetic supervision
-
-## Current Evidence
-
-Hippocampus-8 is already functional at prototype scale. The strongest current
-signal is not that it replaces vector search everywhere; it is that relation
-vectors can recover the right memory when summary similarity alone is
-misleading.
-
-| Capability | Current result |
-| --- | --- |
-| Relationship-stress retrieval | At 49,152 synthetic nodes, Hippo traversal ranked the correct relationship target first in every sampled query. HNSW summary search ranked it first 67.6% of the time in the same setup. |
-| Attach ranking | In the same relationship-stress benchmark, Hippo attach ranked the correct context first in every sampled query. Summary-only attach ranked it first 67.8% of the time. |
-| Teacher-distilled traversal | On 6,144 Qwen-teacher ranking cases, the saved transformer traversal head reached 1.0000 top-1 and 0.99994 precision at 90% recall. |
-| Teacher-distilled attach | On the current synthetic Qwen-teacher holdout, the attach head reached 0.9870 top-1, 0.9912 precision at 90% recall, and 0.9953 hard-negative pairwise accuracy across 230 cases. |
-| Determinism | Traversal and result ordering are deterministic for a fixed graph, query, scorer, and config. |
-
-These are synthetic and teacher-generated benchmarks, not production claims. They
-are useful because they show the core architecture working and give concrete
-targets for the next validation phase.
-
-## What Works Today
-
-- bounded node and edge graph storage
-- first-class node metadata vectors and compact traversal vectors
-- edge vectors that implicitly encode relationship geometry
+- deterministic node and edge graph storage
+- first-class metadata, summary, full, and traversal vectors
+- compact edge vectors that encode relationships without `relation_type` labels
 - deterministic beam and single-path traversal
-- deterministic result ranking via `result_score`
+- deterministic result ranking through `result_score`
+- compact traversal-vector seed index
 - expressway nodes for long-range routing
-- compact deterministic seed index over traversal vectors
+- batched traversal and attach scoring
 - PyTorch scorer backend with a small transformer option
-- batch traversal and attach scoring
-- Qwen-teacher synthetic data pipeline
-- benchmark scripts for ranking, hard negatives, calibration, latency, and
-  HNSW/vector-search comparison
+- Qwen-teacher synthetic data pipeline and benchmark scripts
 
-## Validation Status
+## Current Results
 
-The current benchmark suite is strongest as engineering evidence:
+Source artifact: `rich_1536/reports/benchmark_result_model_exact_holdout.json`.
 
-- the graph engine runs
-- traversal is deterministic
-- relation vectors can beat summary-only retrieval on adversarial synthetic
-  cases
-- the transformer can imitate the generated teacher distribution
+Synthetic Qwen-teacher exact holdout:
 
-The current benchmark suite is not yet enough for production claims. The next
-validation step is real-data or customer-style evaluation, domain-level
-holdouts, and end-to-end runs using the saved transformer checkpoint at 10k,
-50k, and 100k nodes.
+| Metric | Result |
+| --- | ---: |
+| Attach top-1 accuracy | 0.9870 |
+| Attach precision at 90% recall | 0.9912 |
+| Attach hard-negative pairwise accuracy | 0.9953 |
+| Cases | 230 |
 
-## Latest Saved Run
+Adversarial relationship-retrieval benchmark:
 
-Current best checkpoint from the broad Qwen-teacher run:
+| Method | Top-1 |
+| --- | ---: |
+| HNSW summary-vector search | 0.676 |
+| Hippo relationship traversal | 1.000 |
 
-```text
-/content/drive/MyDrive/hippo-qwen-runs/all_12288/training_runs/a100_384_e128_20260625_022008/all_12288_384_transformer_a100_e128.pt
-sha256: 8e975ffd270a8a79f4812bf899f98b3da34c345f27c05a6cc50fd35af4e7fcbe
-```
+This benchmark baits nearest-vector search with semantically close decoys. Hippo
+wins by following the relationship path, not only the closest summary vector.
 
-Training data for that run:
+These are synthetic benchmarks. They show the architecture is working, but they
+are not yet production or customer-data claims.
 
-```text
-384 labeled shards
-6,144 Qwen-labeled episodes
-98,304 traversal examples
-98,304 attach examples
-6,144 traversal ranking cases
-6,144 attach ranking cases
-```
-
-Benchmark snapshots:
-
-| Head | Cases | Top-1 | Avg precision | Precision @ recall 90 | Hard-neg pairwise | ms/case |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Traversal teacher-ranked | 6,144 | 1.0000 | 0.99996 | 0.99994 | n/a | 0.232 |
-| Attach holdout | 230 | 0.9870 | n/a | 0.9912 | 0.9953 | n/a |
-
-These runs show that the student model can imitate generated teacher behavior
-and rank attach candidates strongly on the current synthetic holdout.
-Customer-data generalization and production retrieval quality are the next
-validation targets.
-
-## Install
+## Quick Start
 
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -e .
+.venv/bin/python -m unittest
+.venv/bin/python demo.py
 ```
 
 Optional extras:
@@ -123,51 +73,22 @@ Optional extras:
 .venv/bin/pip install -e ".[hnsw]"
 ```
 
-Run tests:
-
-```bash
-.venv/bin/python -m unittest
-```
-
-Run the local deterministic demo:
-
-```bash
-.venv/bin/python demo.py
-```
-
-## Core API
+## Minimal API
 
 ```python
-from vector_graph import (
-    EdgeFrame,
-    GraphStore,
-    HeuristicTraversalScorer,
-    NodeFrame,
-    TraversalConfig,
-    TraversalController,
-    embed_text,
-)
+from vector_graph import GraphStore, NodeFrame, EdgeFrame
+from vector_graph import TraversalConfig, TraversalController
+from vector_graph import HeuristicTraversalScorer, embed_text
 from vector_graph.vectors import stable_edge_vector
 
 store = GraphStore(max_outgoing_edges=16)
 
-store.add_node(
-    NodeFrame(
-        "root",
-        summary_vector=embed_text("graph memory", 32),
-        metadata={"project": "hippo", "kind": "seed"},
-    )
-)
-store.add_node(
-    NodeFrame(
-        "answer",
-        summary_vector=embed_text("vector frame traversal", 32),
-        metadata={"project": "hippo", "kind": "design"},
-    )
-)
+store.add_node(NodeFrame("root", summary_vector=embed_text("project memory", 32)))
+store.add_node(NodeFrame("answer", summary_vector=embed_text("relationship traversal", 32)))
 
 root = store.get_node("root")
 answer = store.get_node("answer")
+
 store.add_edge(
     EdgeFrame(
         src_id="root",
@@ -181,282 +102,24 @@ controller = TraversalController(
     scorer=HeuristicTraversalScorer(),
     config=TraversalConfig(max_hops=2, fanout=8, beam_width=8),
 )
+
 result = controller.traverse(
-    query_vector=embed_text("traverse vector frame graph", 32),
+    query_vector=embed_text("find traversal memory", 32),
     seed_id="root",
 )
 
 print([decision.node_id for decision in result.included])
 ```
 
-## Design Notes
+## Status
 
-`NodeFrame`:
+This is an engineer-demo prototype, not production infrastructure yet.
 
-- `summary_vector`: compact semantic summary
-- `full_vector`: optional richer detail vector
-- `metadata_vector`: deterministic vectorization of raw metadata
-- `traversal_vector`: compact routing vector, currently 16 dimensions by default
-- `metadata`: raw stable dict for inspection and filtering
+Next work:
 
-`EdgeFrame`:
-
-- `edge_vector`: compact learned relationship frame
-- `confidence`: deterministic pruning and ordering signal
-
-`TraversalScores`:
-
-- `follow`: should traversal move through this edge
-- `read_full`: should the full node be inspected
-- `include`: should the node be included
-- `expand`: should traversal continue from this node
-- `stop`: should this route stop
-- `result`: returned-result rank score
-
-`result_score` is separate from `follow_score` so bridge or expressway nodes can
-be useful for routing without outranking final answers.
-
-## Benchmarking
-
-Scorer benchmark against ranked teacher files:
-
-```bash
-.venv/bin/python scripts/benchmark_scorer.py \
-  --checkpoint models/scorer.pt \
-  --benchmark-dir data/teacher_ranked \
-  --batch-size 4096 \
-  --json-output reports/scorer_benchmark.json
-```
-
-The scorer benchmark reports top-k ranking, precision/recall curves,
-hard-negative pairwise accuracy, calibration, latency, and per-action traversal
-quality for `follow`, `read_full`, `include`, `expand`, `stop`, and `result`.
-
-HNSW/vector-search comparison:
-
-```bash
-.venv/bin/python scripts/benchmark_vector_search_comparison.py \
-  --nodes 50000 \
-  --queries 100 \
-  --backend auto \
-  --json-output reports/vector_search_comparison.json
-```
-
-With the trained transformer checkpoint in Colab:
-
-```bash
-python scripts/benchmark_vector_search_comparison.py \
-  --nodes 50000 \
-  --queries 100 \
-  --backend hnsw \
-  --checkpoint /content/drive/MyDrive/hippo-qwen-runs/all_12288/training_runs/a100_384_e128_20260625_022008/all_12288_384_transformer_a100_e128.pt \
-  --device cuda \
-  --json-output /content/drive/MyDrive/hippo-qwen-runs/all_12288/reports/vector_search_comparison_50k.json
-```
-
-The comparison reports:
-
-- `exact_vector`: brute-force cosine upper-bound baseline
-- `hnsw_vector`: HNSW cosine retrieval when `hnswlib` is installed
-- `hippo_seed_index`: deterministic compact traversal-vector seed lookup
-- `hippo_traversal`: graph walk plus scorer from the indexed seeds
-
-Primary metrics are `precision_at_k`, `hit_at_k`, `mrr`, `latency_ms`, and for
-Hippo traversal also `visited`, `included`, and `seed_count`. Some benchmarks
-report multiple cutoffs, such as `hit_at_1`, `hit_at_3`, `hit_at_5`,
-`hit_at_10`, `precision_at_3`, `precision_at_5`, and `precision_at_10`.
-
-Sample hard 50k comparison from a CPU Colab runtime:
-
-```text
-nodes=50000
-queries=100
-clusters=512
-top_k=10
-vector_noise=0.18
-query_noise=0.15
-scorer=HeuristicTraversalScorer
-```
-
-| Method | Precision@10 | Hit@10 | MRR | Mean latency |
-| --- | ---: | ---: | ---: | ---: |
-| Exact vector | 0.874 | 1.000 | 0.9409 | 1.936 ms |
-| HNSW vector | 0.875 | 1.000 | 0.9409 | 0.513 ms |
-| Hippo seed index | 0.556 | 0.930 | 0.8375 | 1.045 ms |
-| Hippo traversal | 0.890 | 0.930 | 0.9083 | 86.993 ms |
-
-This sample is intentionally not a production claim. It shows the comparison
-harness working and gives a useful baseline: HNSW is much faster for pure vector
-top-k lookup, while graph traversal can recover ranking quality from weaker
-seeds but is currently dominated by Python graph/scorer overhead.
-
-Adversarial relationship-memory benchmark:
-
-```bash
-.venv/bin/python scripts/benchmark_adversarial_memory.py \
-  --cases 4096 \
-  --queries 500 \
-  --decoys-per-case 8 \
-  --noise-nodes 8192 \
-  --top-k 10 \
-  --metric-ks 1,3,5,10 \
-  --backend hnsw \
-  --json-output reports/adversarial_memory_4096_hnsw_multik.json
-```
-
-This benchmark baits summary-vector search with near-query decoys. The correct
-answer is not the nearest summary vector; it is the node reached through the
-right traversal seed and edge relationship vector.
-
-CPU Colab result:
-
-```text
-nodes=49152
-queries=500
-decoys_per_case=8
-top_k=10
-metric_ks=1,3,5,10
-retrieval_limit=10
-seed_limit=1
-target_relation_weight=0.35
-decoy_noise=0.12
-```
-
-Retrieval metrics:
-
-| Method | Precision@1 | Hit@3 | Hit@5 | Hit@10 | MRR | Mean latency |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Exact summary vector | 0.676 | 0.900 | 0.968 | 1.000 | 0.7989 | 1.807 ms |
-| HNSW summary vector | 0.676 | 0.900 | 0.968 | 1.000 | 0.7989 | 0.274 ms |
-| Hippo traversal | 1.000 | 1.000 | 1.000 | 1.000 | 1.0000 | 2.046 ms |
-
-Attach metrics:
-
-| Method | Precision@1 | Hit@3 | Hit@5 | Hit@10 | MRR | Mean latency |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Summary attach | 0.678 | 0.902 | 0.968 | 1.000 | 0.8000 | 0.212 ms |
-| Hippo attach | 1.000 | 1.000 | 1.000 | 1.000 | 1.0000 | 0.556 ms |
-
-The JSON report also includes `precision_at_3`, `precision_at_5`, and
-`precision_at_10`. This benchmark has one correct target per query, so those
-values are effectively `hit_at_k / k`; the tables use `hit_at_k` for the
-higher cutoffs because it is easier to read as success within the returned set.
-
-This is the benchmark shape where Hippo is supposed to win: relation/path-aware
-top-1 ranking under adversarial nearest-vector decoys. HNSW still finds the
-target somewhere in the top-5 most of the time, but it misranks the nearest
-summary decoys above the relationship target. Hippo is about 32 percentage
-points better on top-1 here, while HNSW is still much faster for pure vector
-lookup.
-
-Transformer traversal scale benchmark:
-
-```bash
-.venv/bin/python scripts/benchmark_indexed_traversal.py \
-  --nodes 50000 \
-  --queries 100 \
-  --checkpoint models/scorer.pt
-```
-
-## Data And Training
-
-Generated datasets, teacher runs, reports, and checkpoints are intentionally not
-tracked in git. Use Drive or local `runs/` for artifacts.
-
-Generate broad synthetic teacher episodes:
-
-```bash
-.venv/bin/python scripts/generate_domain_teacher_episodes.py \
-  --domain-set all \
-  --episodes 12288 \
-  --candidate-limit 16 \
-  --output-dir data/domain_teacher_episodes
-```
-
-Label with Qwen:
-
-```bash
-.venv/bin/python scripts/run_qwen_label_shards.py \
-  --episodes-dir data/domain_teacher_episodes \
-  --output-dir data/qwen_teacher_episodes \
-  --shard-count 768 \
-  --expected-per-shard 16 \
-  --request-timeout 60 \
-  --retries 2 \
-  --continue-on-failure
-```
-
-Convert labels into scorer/ranking data:
-
-```bash
-.venv/bin/python scripts/convert_teacher_episodes.py \
-  --episodes-dir data/qwen_teacher_episodes \
-  --output-data-dir data/teacher_scorer \
-  --output-ranking-dir data/teacher_ranked
-```
-
-Train the transformer scorer:
-
-```bash
-.venv/bin/python scripts/train_scorer.py \
-  --model-kind transformer \
-  --attach-head-kind hybrid \
-  --data-dir data/teacher_scorer \
-  --ranking-data-dir data/teacher_ranked \
-  --epochs 128 \
-  --batch-size 2048 \
-  --ranking-batch-size 384 \
-  --ranking-loss-weight 0.5 \
-  --listwise-loss-weight 0.25 \
-  --checkpoint-selection ranking_loss \
-  --output models/scorer.pt
-```
-
-## Local Drive Handoff
-
-Qwen labeling is API-bound, so it can run locally while training runs in Colab.
-The local runner uses `rclone` to pull existing Drive artifacts, resume only
-incomplete shards, convert labels, and push progress after each worker round.
-
-```bash
-scripts/local_qwen_drive_run.sh \
-  --run-name all_12288 \
-  --remote gdrive:hippo-qwen-runs/all_12288 \
-  --workers 6 \
-  --target-complete-shards 384
-```
-
-It prompts for a Qwen/DashScope key if `DASHSCOPE_API_KEY` or `QWEN_API_KEY` is
-not already set.
-
-## Colab Workflow
-
-In Colab:
-
-```bash
-git clone https://github.com/CameronBadman/Hippocampus-8.git /content/hippo-qwen-2
-cd /content/hippo-qwen-2
-python -m pip install -e ".[torch,hnsw]"
-```
-
-Mount Drive and use artifacts under:
-
-```text
-/content/drive/MyDrive/hippo-qwen-runs/all_12288
-```
-
-The helper `scripts/colab_keepalive_sidecar.py` can keep a separate Colab bridge
-warm and delete temporary status cells, but normal training and benchmarks
-should be reproducible from explicit shell commands.
-
-## Remaining Work
-
-- run real-data or customer-style validation, not only synthetic/Qwen-teacher
-  labels
-- add domain-level or generator-seed-level holdouts
-- benchmark end-to-end retrieval at 10k, 50k, and 100k nodes
-- run vector and adversarial-memory comparisons with the saved transformer
-  checkpoint once Drive/GPU are mounted in Colab
-- improve attach behavior when high recall is required
-- add persistent storage and a stable server API
-- add error-analysis reports for failed traversal and attach cases
+- real-data or customer-style validation
+- domain-level holdouts
+- end-to-end 10k, 50k, and 100k node benchmarks
+- persistent storage
+- stable server API
+- frontend demo
